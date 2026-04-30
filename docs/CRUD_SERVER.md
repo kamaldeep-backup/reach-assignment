@@ -36,7 +36,8 @@ flowchart LR
   DirectClient[Direct API Client] --> API
   API --> Auth[FastAPI Security Dependencies]
   API --> Validation[Pydantic Validation]
-  API --> DB[(Postgres)]
+  API --> Repositories[Repository Layer]
+  Repositories --> DB[(Postgres)]
   API --> Logs[Structured Logs]
 ```
 
@@ -68,6 +69,18 @@ It does not:
 - mutate submitted jobs through public update/delete endpoints
 
 Those behaviors belong to the full distributed queue implementation.
+
+### Repository Layer
+
+Repositories own database access and keep SQLAlchemy query details out of route handlers and authentication dependencies.
+
+The current baseline includes:
+
+- `app/repositories/users.py` for registration, login lookup, and user-to-tenant membership lookup
+- `app/repositories/api_keys.py` for API key creation, listing, lookup, revocation, and usage timestamps
+- `app/repositories/jobs.py` for job lookup, creation, listing, and event history
+
+Route modules remain responsible for HTTP concerns such as authentication dependencies, request validation, status codes, and response serialization.
 
 ## Data Model
 

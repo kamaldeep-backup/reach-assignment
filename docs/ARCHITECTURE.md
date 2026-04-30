@@ -712,6 +712,8 @@ Important log events:
 
 ## API Endpoints
 
+Route handlers should stay thin. Authentication, request validation, HTTP status codes, and response serialization belong in the API layer; SQLAlchemy queries and database writes belong in repositories such as `app/repositories/users.py`, `app/repositories/api_keys.py`, and `app/repositories/jobs.py`.
+
 ### `POST /auth/register`
 
 Creates a dashboard user and an initial tenant.
