@@ -1,7 +1,16 @@
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    field_validator,
+)
+
+from app.models import JobStatus
 
 ALLOWED_API_KEY_SCOPES = frozenset({"jobs:read", "jobs:write"})
 DEFAULT_API_KEY_SCOPES = ["jobs:read", "jobs:write"]
@@ -101,3 +110,52 @@ class APIKeyResponse(CamelModel):
 
 class APIKeyCreateResponse(APIKeyResponse):
     api_key: str = Field(alias="apiKey")
+
+
+class JobCreateRequest(CamelModel):
+    job_type: str = Field(alias="type", min_length=1, max_length=100)
+    payload: dict[str, Any]
+    priority: int = Field(default=0, ge=0, le=100)
+
+    @field_validator("job_type")
+    @classmethod
+    def job_type_must_not_be_blank(cls, value: str) -> str:
+        job_type = value.strip()
+        if not job_type:
+            raise ValueError("Job type cannot be blank")
+        return job_type
+
+    @field_validator("payload")
+    @classmethod
+    def payload_must_be_object(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if not value:
+            raise ValueError("Payload cannot be empty")
+        return value
+
+
+class JobResponse(CamelModel):
+    job_id: uuid.UUID = Field(alias="jobId")
+    idempotency_key: str = Field(alias="idempotencyKey")
+    type: str
+    payload: dict[str, Any]
+    status: JobStatus
+    priority: int
+    last_error: str | None = Field(alias="lastError")
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: datetime = Field(alias="updatedAt")
+    completed_at: datetime | None = Field(alias="completedAt")
+
+
+class JobListResponse(CamelModel):
+    items: list[JobResponse]
+
+
+class JobEventResponse(CamelModel):
+    event_id: uuid.UUID = Field(alias="eventId")
+    job_id: uuid.UUID = Field(alias="jobId")
+    event_type: str = Field(alias="eventType")
+    from_status: JobStatus | None = Field(alias="fromStatus")
+    to_status: JobStatus | None = Field(alias="toStatus")
+    message: str | None
+    metadata: dict[str, Any]
+    created_at: datetime = Field(alias="createdAt")

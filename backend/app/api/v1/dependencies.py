@@ -11,6 +11,10 @@ from app.models import APIKey, Tenant, TenantUser, User
 from app.services.security import decode_access_token, hash_api_key
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+optional_oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="/api/v1/auth/login",
+    auto_error=False,
+)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -25,9 +29,23 @@ class AuthenticatedAPIKey(NamedTuple):
     tenant: Tenant
 
 
+class AuthenticatedTenant(NamedTuple):
+    tenant: Tenant
+    user: User | None
+    api_key: APIKey | None
+    role: str | None
+
+
 async def get_current_user_context(
     token: Annotated[str, Depends(oauth2_scheme)],
     db_session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> AuthenticatedUser:
+    return await resolve_user_context(token=token, db_session=db_session)
+
+
+async def resolve_user_context(
+    token: str,
+    db_session: AsyncSession,
 ) -> AuthenticatedUser:
     user_id = decode_access_token(token)
     if user_id is None:
@@ -70,6 +88,13 @@ async def get_api_key_context(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing API key",
         )
+    return await resolve_api_key_context(raw_api_key=raw_api_key, db_session=db_session)
+
+
+async def resolve_api_key_context(
+    raw_api_key: str,
+    db_session: AsyncSession,
+) -> AuthenticatedAPIKey:
 
     result = await db_session.execute(
         select(APIKey, Tenant)
@@ -103,3 +128,42 @@ async def get_api_key_context(
     api_key.last_used_at = datetime.now(UTC)
     await db_session.flush()
     return AuthenticatedAPIKey(api_key=api_key, tenant=tenant)
+
+
+async def get_current_tenant_context(
+    token: Annotated[str | None, Depends(optional_oauth2_scheme)],
+    raw_api_key: Annotated[str | None, Depends(api_key_header)],
+    db_session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> AuthenticatedTenant:
+    if token is not None:
+        user_context = await resolve_user_context(token=token, db_session=db_session)
+        return AuthenticatedTenant(
+            tenant=user_context.tenant,
+            user=user_context.user,
+            api_key=None,
+            role=user_context.role,
+        )
+    if raw_api_key is not None:
+        api_key_context = await resolve_api_key_context(
+            raw_api_key=raw_api_key,
+            db_session=db_session,
+        )
+        return AuthenticatedTenant(
+            tenant=api_key_context.tenant,
+            user=None,
+            api_key=api_key_context.api_key,
+            role=None,
+        )
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Missing authentication credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def require_api_key_scope(context: AuthenticatedTenant, scope: str) -> None:
+    if context.api_key is not None and scope not in context.api_key.scopes:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"API key is missing required scope: {scope}",
+        )
