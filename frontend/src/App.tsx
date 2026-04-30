@@ -1,20 +1,32 @@
-import { Button } from "@/components/ui/button"
+import { AccountPanel } from "@/features/auth/account-panel"
+import { AuthScreen } from "@/features/auth/auth-screen"
+import { useAuth } from "@/features/auth/auth-queries"
 
 export function App() {
-  return (
-    <div className="flex min-h-svh p-6">
-      <div className="flex max-w-md min-w-0 flex-col gap-4 text-sm leading-loose">
-        <div>
-          <h1 className="font-medium">Project ready!</h1>
-          <p>You may now add components and start building.</p>
-          <p>We&apos;ve already added the button component for you.</p>
-          <Button className="mt-2">Button</Button>
-        </div>
-        <div className="font-mono text-xs text-muted-foreground">
-          (Press <kbd>d</kbd> to toggle dark mode)
-        </div>
-      </div>
-    </div>
+  const {
+    currentUserQuery,
+    isAuthenticated,
+    loginMutation,
+    logout,
+    signupMutation,
+  } = useAuth()
+
+  return isAuthenticated ? (
+    <AccountPanel
+      currentUser={currentUserQuery.data}
+      error={currentUserQuery.error}
+      isLoading={currentUserQuery.isLoading}
+      onLogout={logout}
+    />
+  ) : (
+    <AuthScreen
+      onLogin={loginMutation.mutate}
+      onSignup={signupMutation.mutate}
+      isLoginPending={loginMutation.isPending}
+      isSignupPending={signupMutation.isPending}
+      loginError={loginMutation.error}
+      signupError={signupMutation.error}
+    />
   )
 }
 
