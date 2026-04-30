@@ -8,6 +8,21 @@ Minimal FastAPI backend scaffold.
 uv venv
 source .venv/bin/activate
 uv sync --dev
+cp .env.example .env
+```
+
+## Database
+
+Start local Postgres from the repository root:
+
+```bash
+docker compose up -d postgres
+```
+
+The default connection string is:
+
+```text
+postgresql+asyncpg://reach:reach@127.0.0.1:5432/reach
 ```
 
 ## Run locally
@@ -26,6 +41,7 @@ uvicorn app.main:app --reload
 
 ```bash
 curl http://127.0.0.1:8000/api/v1/health
+curl http://127.0.0.1:8000/api/v1/health/database
 ```
 
 ## Test
