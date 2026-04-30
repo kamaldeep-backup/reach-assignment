@@ -1,4 +1,7 @@
 from datetime import UTC, datetime, timedelta
+import hashlib
+import hmac
+import secrets
 import uuid
 
 import jwt
@@ -61,3 +64,19 @@ def decode_access_token(token: str) -> uuid.UUID | None:
         return uuid.UUID(str(payload["sub"]))
     except (KeyError, ValueError, TypeError):
         return None
+
+
+def generate_api_key() -> tuple[str, str]:
+    key_prefix = f"tqk_live_{secrets.token_hex(4)}"
+    secret = secrets.token_urlsafe(32)
+    return f"{key_prefix}_{secret}", key_prefix
+
+
+def hash_api_key(api_key: str) -> str:
+    settings = get_settings()
+    digest = hmac.new(
+        settings.secret_key.encode("utf-8"),
+        api_key.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"hmac_sha256${digest}"

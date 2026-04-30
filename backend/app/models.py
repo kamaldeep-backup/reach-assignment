@@ -1,7 +1,17 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, func, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -72,7 +82,11 @@ class TenantUser(Base):
 
 class APIKey(Base):
     __tablename__ = "api_keys"
-    __table_args__ = (UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),)
+    __table_args__ = (
+        UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),
+        Index("idx_api_keys_tenant_created", "tenant_id", "created_at"),
+        Index("idx_api_keys_key_prefix", "key_prefix"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
