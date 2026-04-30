@@ -13,16 +13,24 @@ cp .env.example .env
 
 ## Database
 
-Start local Postgres from the repository root:
+Start the backend and local Postgres from the repository root:
 
 ```bash
-docker compose up -d postgres
+docker compose up
 ```
 
-The default connection string is:
+The default local connection string for running the backend outside Docker is:
 
 ```text
 postgresql+asyncpg://reach:reach@127.0.0.1:5432/reach
+```
+
+When running through Docker Compose, the server loads variables from
+`backend/.env` when present and overrides `DATABASE_URL` to use the Compose
+Postgres service hostname:
+
+```text
+postgresql+asyncpg://reach:reach@postgres:5432/reach
 ```
 
 ## Run locally
