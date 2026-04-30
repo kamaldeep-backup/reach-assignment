@@ -836,8 +836,7 @@ Request:
     "to": "customer@example.com",
     "template": "welcome"
   },
-  "priority": 0,
-  "maxAttempts": 3
+  "priority": 0
 }
 ```
 
@@ -880,7 +879,6 @@ Query parameters:
 ```text
 status=PENDING|RUNNING|SUCCEEDED|FAILED|DEAD_LETTERED|CANCELLED
 limit=50
-cursor=opaque-cursor
 ```
 
 ### `GET /jobs/{job_id}/events`

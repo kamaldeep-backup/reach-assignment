@@ -1,8 +1,8 @@
-# Basic CRUD Server
+# Basic Job API Server
 
-This document outlines a minimal CRUD server for the take-home project. It describes the simpler baseline version of the system: authenticated tenants can create, read, update, and delete job records through an API, while the system persists data durably and exposes enough structure to evolve into the full distributed task queue platform.
+This document outlines a minimal job API server for the take-home project. It describes the simpler baseline version of the system: authenticated tenants can submit jobs, list jobs, inspect job status, and read job history while the system persists data durably and exposes enough structure to evolve into the full distributed task queue platform.
 
-The CRUD server is intentionally smaller than the full queue implementation. It focuses on clear API design, persistent storage, validation, authentication, status visibility, and reproducible local setup.
+The baseline server is intentionally smaller than the full queue implementation. It focuses on clear API design, persistent storage, validation, authentication, status visibility, and reproducible local setup.
 
 ## Goals
 
@@ -32,7 +32,7 @@ The CRUD server is intentionally smaller than the full queue implementation. It 
 
 ```mermaid
 flowchart LR
-  Dashboard[Dashboard User] --> API[FastAPI CRUD API]
+  Dashboard[Dashboard User] --> API[FastAPI Job API]
   DirectClient[Direct API Client] --> API
   API --> Auth[FastAPI Security Dependencies]
   API --> Validation[Pydantic Validation]
@@ -42,7 +42,7 @@ flowchart LR
 
 ## Responsibilities
 
-### CRUD API
+### Job API
 
 The API owns the client-facing behavior.
 
@@ -54,9 +54,6 @@ It does:
 - return existing jobs for duplicate idempotency keys
 - list jobs by tenant
 - fetch job details
-- update allowed job fields
-- cancel jobs
-- delete jobs if allowed by policy
 - record job history events
 - expose health checks
 
@@ -68,6 +65,7 @@ It does not:
 - maintain a DLQ
 - enforce worker concurrency quotas
 - stream real-time updates
+- mutate submitted jobs through public update/delete endpoints
 
 Those behaviors belong to the full distributed queue implementation.
 
@@ -366,39 +364,11 @@ Query parameters:
 ```text
 status=PENDING|RUNNING|SUCCEEDED|FAILED|CANCELLED
 limit=50
-cursor=opaque-cursor
 ```
 
 ### `GET /jobs/{job_id}`
 
 Returns one job owned by the authenticated tenant.
-
-### `PATCH /jobs/{job_id}`
-
-Updates editable job metadata.
-
-Allowed updates:
-
-- `priority`
-- `payload` only while the job is still `PENDING`
-
-The API should reject updates to terminal jobs.
-
-### `POST /jobs/{job_id}/cancel`
-
-Cancels a pending job.
-
-Only `PENDING` jobs can be cancelled in the basic CRUD server.
-
-### `DELETE /jobs/{job_id}`
-
-Deletes a job if deletion is allowed by policy.
-
-For a take-home, this can be limited to terminal jobs:
-
-- `SUCCEEDED`
-- `FAILED`
-- `CANCELLED`
 
 ### `GET /jobs/{job_id}/events`
 
@@ -504,20 +474,19 @@ Errors should use one consistent response shape:
 ```json
 {
   "error": {
-    "code": "INVALID_STATE",
-    "message": "Only pending jobs can be cancelled."
+    "code": "UNAUTHORIZED",
+    "message": "Missing authentication credentials."
   }
 }
 ```
 
 ## Observability
 
-The basic CRUD server should include:
+The basic job API server should include:
 
 - structured request logs
 - request ID propagation
 - job creation logs
-- job update logs
 - authentication failure logs
 - health check endpoint
 
@@ -527,7 +496,6 @@ Useful optional metrics:
 http_requests_total
 http_request_duration_seconds
 jobs_created_total
-jobs_cancelled_total
 jobs_by_status
 ```
 
@@ -686,16 +654,12 @@ Required tests:
 - creating a job requires authentication
 - job queries are tenant-scoped
 - duplicate idempotency keys return the existing job
-- pending jobs can be updated
-- terminal jobs cannot be updated
-- pending jobs can be cancelled
-- non-pending jobs cannot be cancelled
-- terminal jobs can be deleted if deletion is enabled
-- job events are written for create, update, cancel, and delete actions
+- job events are written for create actions
+- public job update, cancel, and delete endpoints are not exposed in the baseline API
 
 ## What This Leaves Out
 
-The basic CRUD server does not include:
+The basic job API server does not include:
 
 - worker execution
 - lease management
@@ -711,9 +675,9 @@ The basic CRUD server does not include:
 
 Those features are covered by the full architecture in `ARCHITECTURE.md`.
 
-## Path From CRUD Server To Full Queue
+## Path From Baseline API To Full Queue
 
-The CRUD server can evolve into the distributed task queue by adding:
+The baseline API can evolve into the distributed task queue by adding:
 
 1. `attempts`, `max_attempts`, `run_after`, `lease_expires_at`, and `locked_by` fields to jobs.
 2. Worker claim logic using `FOR UPDATE SKIP LOCKED`.
