@@ -1,4 +1,5 @@
 from functools import lru_cache
+import secrets
 
 from pydantic import Field, PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -11,6 +12,9 @@ class Settings(BaseSettings):
         default="postgresql+asyncpg://reach:reach@127.0.0.1:5432/reach"
     )
     database_echo: bool = False
+    secret_key: str = Field(default_factory=lambda: secrets.token_urlsafe(32))
+    access_token_expire_minutes: int = 30
+    jwt_algorithm: str = "HS256"
 
     model_config = SettingsConfigDict(
         env_file=".env",
