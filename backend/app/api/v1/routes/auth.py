@@ -3,13 +3,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.dependencies import AuthenticatedUser, get_current_user_context
 from app.core.database import get_db_session
-from app.models import Tenant, TenantUser, User
+from app.repositories import users as users_repository
 from app.schemas import CurrentUserResponse, RegisterRequest, RegisterResponse, TokenResponse
 from app.services.security import (
     create_access_token,
@@ -31,13 +30,13 @@ async def register(
     db_session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> RegisterResponse:
     email = normalize_email(request.email)
-    tenant = Tenant(name=request.tenant_name)
-    user = User(email=email, password_hash=hash_password(request.password))
-    db_session.add_all([tenant, user])
     try:
-        await db_session.flush()
-        db_session.add(TenantUser(tenant_id=tenant.id, user_id=user.id, role="owner"))
-        await db_session.flush()
+        user, tenant, _membership = await users_repository.create_user_with_tenant(
+            db_session=db_session,
+            email=email,
+            password_hash=hash_password(request.password),
+            tenant_name=request.tenant_name,
+        )
     except IntegrityError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -53,8 +52,10 @@ async def login(
     db_session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> TokenResponse:
     email = normalize_email(form_data.username)
-    result = await db_session.execute(select(User).where(User.email == email))
-    user = result.scalar_one_or_none()
+    user = await users_repository.get_user_by_email(
+        db_session=db_session,
+        email=email,
+    )
 
     if not verify_password_with_dummy(
         form_data.password, user.password_hash if user is not None else None
@@ -77,8 +78,11 @@ async def login(
             detail="Inactive user",
         )
 
-    user.last_login_at = datetime.now(UTC)
-    await db_session.flush()
+    await users_repository.update_last_login_at(
+        db_session=db_session,
+        user=user,
+        last_login_at=datetime.now(UTC),
+    )
     return TokenResponse(access_token=create_access_token(user.id))
 
 

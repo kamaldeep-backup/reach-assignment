@@ -10,7 +10,6 @@ from fastapi import (
     Request,
     status,
 )
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +20,7 @@ from app.api.v1.dependencies import (
 )
 from app.core.database import get_db_session
 from app.models import Job, JobEvent, JobStatus
+from app.repositories import jobs as jobs_repository
 from app.schemas import (
     JobCreateRequest,
     JobEventResponse,
@@ -79,39 +79,17 @@ def serialize_event(event: JobEvent) -> JobEventResponse:
     )
 
 
-def record_job_event(
-    *,
-    db_session: AsyncSession,
-    job: Job,
-    event_type: str,
-    from_status: JobStatus | None,
-    to_status: JobStatus | None,
-    message: str | None = None,
-    metadata: dict | None = None,
-) -> None:
-    db_session.add(
-        JobEvent(
-            job_id=job.id,
-            tenant_id=job.tenant_id,
-            event_type=event_type,
-            from_status=from_status,
-            to_status=to_status,
-            message=message,
-            event_metadata=metadata or {},
-        )
-    )
-
-
 async def get_tenant_job_or_404(
     *,
     job_id: uuid.UUID,
     tenant_id: uuid.UUID,
     db_session: AsyncSession,
 ) -> Job:
-    result = await db_session.execute(
-        select(Job).where(Job.id == job_id, Job.tenant_id == tenant_id)
+    job = await jobs_repository.get_tenant_job(
+        db_session=db_session,
+        tenant_id=tenant_id,
+        job_id=job_id,
     )
-    job = result.scalar_one_or_none()
     if job is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -144,39 +122,34 @@ async def create_job(
         )
 
     tenant_id = current_context.tenant.id
-    existing_result = await db_session.execute(
-        select(Job).where(
-            Job.tenant_id == tenant_id,
-            Job.idempotency_key == idempotency_key,
-        )
+    existing_job = await jobs_repository.get_job_by_idempotency_key(
+        db_session=db_session,
+        tenant_id=tenant_id,
+        idempotency_key=idempotency_key,
     )
-    existing_job = existing_result.scalar_one_or_none()
     if existing_job is not None:
         return serialize_job(existing_job)
 
-    job = Job(
-        tenant_id=tenant_id,
-        idempotency_key=idempotency_key,
-        job_type=request.job_type,
-        payload=request.payload,
-        priority=request.priority,
-    )
-    db_session.add(job)
     try:
-        await db_session.flush()
+        job = await jobs_repository.create_job(
+            db_session=db_session,
+            tenant_id=tenant_id,
+            idempotency_key=idempotency_key,
+            job_type=request.job_type,
+            payload=request.payload,
+            priority=request.priority,
+        )
     except IntegrityError:
         await db_session.rollback()
-        existing_result = await db_session.execute(
-            select(Job).where(
-                Job.tenant_id == tenant_id,
-                Job.idempotency_key == idempotency_key,
-            )
+        existing_job = await jobs_repository.get_job_by_idempotency_key(
+            db_session=db_session,
+            tenant_id=tenant_id,
+            idempotency_key=idempotency_key,
         )
-        existing_job = existing_result.scalar_one_or_none()
         if existing_job is not None:
             return serialize_job(existing_job)
         raise
-    record_job_event(
+    await jobs_repository.create_job_event(
         db_session=db_session,
         job=job,
         event_type="SUBMITTED",
@@ -184,8 +157,7 @@ async def create_job(
         to_status=JobStatus.PENDING,
         message="Job submitted",
     )
-    await db_session.flush()
-    await db_session.refresh(job)
+    await jobs_repository.refresh_job(db_session=db_session, job=job)
     return serialize_job(job)
 
 
@@ -197,17 +169,12 @@ async def list_jobs(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> JobListResponse:
     require_api_key_scope(current_context, "jobs:read")
-    conditions = [Job.tenant_id == current_context.tenant.id]
-    if status_filter is not None:
-        conditions.append(Job.status == status_filter)
-
-    result = await db_session.execute(
-        select(Job)
-        .where(*conditions)
-        .order_by(Job.created_at.desc(), Job.id.desc())
-        .limit(limit)
+    jobs = await jobs_repository.list_tenant_jobs(
+        db_session=db_session,
+        tenant_id=current_context.tenant.id,
+        status_filter=status_filter,
+        limit=limit,
     )
-    jobs = list(result.scalars().all())
     return JobListResponse(items=[serialize_job(job) for job in jobs])
 
 
@@ -238,12 +205,9 @@ async def list_job_events(
         tenant_id=current_context.tenant.id,
         db_session=db_session,
     )
-    result = await db_session.execute(
-        select(JobEvent)
-        .where(
-            JobEvent.job_id == job_id,
-            JobEvent.tenant_id == current_context.tenant.id,
-        )
-        .order_by(JobEvent.created_at.asc(), JobEvent.id.asc())
+    events = await jobs_repository.list_job_events(
+        db_session=db_session,
+        tenant_id=current_context.tenant.id,
+        job_id=job_id,
     )
-    return [serialize_event(event) for event in result.scalars().all()]
+    return [serialize_event(event) for event in events]

@@ -3,12 +3,12 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.dependencies import AuthenticatedUser, get_current_user_context
 from app.core.database import get_db_session
 from app.models import APIKey
+from app.repositories import api_keys as api_keys_repository
 from app.schemas import APIKeyCreateRequest, APIKeyCreateResponse, APIKeyResponse
 from app.services.security import generate_api_key, hash_api_key
 
@@ -40,7 +40,8 @@ async def create_api_key(
     db_session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> APIKeyCreateResponse:
     raw_api_key, key_prefix = generate_api_key()
-    api_key = APIKey(
+    api_key = await api_keys_repository.create_api_key(
+        db_session=db_session,
         tenant_id=current_user.tenant.id,
         created_by_user_id=current_user.user.id,
         key_hash=hash_api_key(raw_api_key),
@@ -49,9 +50,6 @@ async def create_api_key(
         scopes=request.scopes,
         expires_at=request.expires_at,
     )
-    db_session.add(api_key)
-    await db_session.flush()
-    await db_session.refresh(api_key)
 
     return APIKeyCreateResponse(
         **serialize_api_key(api_key).model_dump(by_alias=True),
@@ -64,12 +62,11 @@ async def list_api_keys(
     current_user: Annotated[AuthenticatedUser, Depends(get_current_user_context)],
     db_session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> list[APIKeyResponse]:
-    result = await db_session.execute(
-        select(APIKey)
-        .where(APIKey.tenant_id == current_user.tenant.id)
-        .order_by(APIKey.created_at.desc(), APIKey.id.desc())
+    api_keys = await api_keys_repository.list_tenant_api_keys(
+        db_session=db_session,
+        tenant_id=current_user.tenant.id,
     )
-    return [serialize_api_key(api_key) for api_key in result.scalars().all()]
+    return [serialize_api_key(api_key) for api_key in api_keys]
 
 
 @router.get("/{api_key_id}", response_model=APIKeyResponse)
@@ -98,9 +95,11 @@ async def revoke_api_key(
         db_session=db_session,
     )
     if api_key.revoked_at is None:
-        api_key.is_active = False
-        api_key.revoked_at = datetime.now(UTC)
-        await db_session.flush()
+        await api_keys_repository.revoke_api_key(
+            db_session=db_session,
+            api_key=api_key,
+            revoked_at=datetime.now(UTC),
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -109,10 +108,11 @@ async def get_tenant_api_key_or_404(
     tenant_id: uuid.UUID,
     db_session: AsyncSession,
 ) -> APIKey:
-    result = await db_session.execute(
-        select(APIKey).where(APIKey.id == api_key_id, APIKey.tenant_id == tenant_id)
+    api_key = await api_keys_repository.get_tenant_api_key(
+        db_session=db_session,
+        tenant_id=tenant_id,
+        api_key_id=api_key_id,
     )
-    api_key = result.scalar_one_or_none()
     if api_key is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

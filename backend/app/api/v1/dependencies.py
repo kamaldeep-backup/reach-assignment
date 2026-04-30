@@ -3,11 +3,12 @@ from typing import Annotated, NamedTuple
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
-from app.models import APIKey, Tenant, TenantUser, User
+from app.models import APIKey, Tenant, User
+from app.repositories import api_keys as api_keys_repository
+from app.repositories import users as users_repository
 from app.services.security import decode_access_token, hash_api_key
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -55,14 +56,10 @@ async def resolve_user_context(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    result = await db_session.execute(
-        select(User, Tenant, TenantUser.role)
-        .join(TenantUser, TenantUser.user_id == User.id)
-        .join(Tenant, Tenant.id == TenantUser.tenant_id)
-        .where(User.id == user_id)
-        .order_by(TenantUser.created_at.asc())
+    row = await users_repository.get_user_with_primary_tenant(
+        db_session=db_session,
+        user_id=user_id,
     )
-    row = result.first()
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -95,13 +92,10 @@ async def resolve_api_key_context(
     raw_api_key: str,
     db_session: AsyncSession,
 ) -> AuthenticatedAPIKey:
-
-    result = await db_session.execute(
-        select(APIKey, Tenant)
-        .join(Tenant, Tenant.id == APIKey.tenant_id)
-        .where(APIKey.key_hash == hash_api_key(raw_api_key))
+    row = await api_keys_repository.get_api_key_with_tenant_by_hash(
+        db_session=db_session,
+        key_hash=hash_api_key(raw_api_key),
     )
-    row = result.one_or_none()
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -125,8 +119,11 @@ async def resolve_api_key_context(
             detail="Expired API key",
         )
 
-    api_key.last_used_at = datetime.now(UTC)
-    await db_session.flush()
+    await api_keys_repository.update_last_used_at(
+        db_session=db_session,
+        api_key=api_key,
+        last_used_at=datetime.now(UTC),
+    )
     return AuthenticatedAPIKey(api_key=api_key, tenant=tenant)
 
 
