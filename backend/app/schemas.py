@@ -49,6 +49,8 @@ class TenantSummary(CamelModel):
     id: uuid.UUID
     name: str
     role: str
+    max_running_jobs: int = Field(alias="maxRunningJobs")
+    submit_rate_limit: int = Field(alias="submitRateLimit")
 
 
 class CurrentUserResponse(CamelModel):
@@ -140,6 +142,11 @@ class JobResponse(CamelModel):
     payload: dict[str, Any]
     status: JobStatus
     priority: int
+    attempts: int
+    max_attempts: int = Field(alias="maxAttempts")
+    run_after: datetime = Field(alias="runAfter")
+    lease_expires_at: datetime | None = Field(alias="leaseExpiresAt")
+    locked_by: str | None = Field(alias="lockedBy")
     last_error: str | None = Field(alias="lastError")
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime = Field(alias="updatedAt")

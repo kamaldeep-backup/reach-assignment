@@ -100,5 +100,7 @@ async def me(
             "id": current_user.tenant.id,
             "name": current_user.tenant.name,
             "role": current_user.role,
+            "maxRunningJobs": current_user.tenant.max_running_jobs,
+            "submitRateLimit": current_user.tenant.submit_rate_limit,
         },
     )
