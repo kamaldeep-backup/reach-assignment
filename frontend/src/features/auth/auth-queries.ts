@@ -66,5 +66,6 @@ export function useAuth() {
     loginMutation,
     logout,
     signupMutation,
+    token,
   }
 }
