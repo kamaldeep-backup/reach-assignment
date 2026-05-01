@@ -1,4 +1,4 @@
-import { RefreshCwIcon } from "lucide-react"
+import { ChevronLeftIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -16,7 +16,13 @@ import { JOB_STATUSES, type JobResponse, type JobStatusFilter } from "@/lib/jobs
 type JobsCardProps = {
   jobs: JobResponse[]
   isLoading: boolean
+  isFetching: boolean
+  page: number
+  pageSize: number
   statusFilter: JobStatusFilter
+  totalJobs: number
+  hasNextPage: boolean
+  onPageChange: (page: number) => void
   onStatusFilterChange: (status: JobStatusFilter) => void
   onRefresh: () => void
   onSelectJob: (jobId: string) => void
@@ -33,11 +39,21 @@ const statusFilterOptions: Array<{ value: JobStatusFilter; label: string }> = [
 export function JobsCard({
   jobs,
   isLoading,
+  isFetching,
+  page,
+  pageSize,
   statusFilter,
+  totalJobs,
+  hasNextPage,
+  onPageChange,
   onStatusFilterChange,
   onRefresh,
   onSelectJob,
 }: JobsCardProps) {
+  const firstJobNumber = totalJobs === 0 ? 0 : (page - 1) * pageSize + 1
+  const lastJobNumber = Math.min(page * pageSize, totalJobs)
+  const totalPages = Math.max(1, Math.ceil(totalJobs / pageSize))
+
   return (
     <Card className="min-w-0">
       <CardHeader>
@@ -72,6 +88,39 @@ export function JobsCard({
           isLoading={isLoading}
           onSelectJob={onSelectJob}
         />
+        <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-sm text-muted-foreground">
+            {isFetching && !isLoading ? "Updating. " : null}
+            Showing {firstJobNumber}-{lastJobNumber} of {totalJobs} jobs
+          </div>
+          <div className="flex items-center justify-between gap-3 sm:justify-end">
+            <div className="text-sm text-muted-foreground">
+              Page {page} of {totalPages}
+            </div>
+            <div className="flex items-center gap-1">
+              <Button
+                variant="outline"
+                size="icon-sm"
+                aria-label="Previous jobs page"
+                title="Previous page"
+                disabled={page <= 1}
+                onClick={() => onPageChange(Math.max(1, page - 1))}
+              >
+                <ChevronLeftIcon />
+              </Button>
+              <Button
+                variant="outline"
+                size="icon-sm"
+                aria-label="Next jobs page"
+                title="Next page"
+                disabled={!hasNextPage}
+                onClick={() => onPageChange(page + 1)}
+              >
+                <ChevronRightIcon />
+              </Button>
+            </div>
+          </div>
+        </div>
       </CardContent>
     </Card>
   )

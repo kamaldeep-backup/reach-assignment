@@ -172,13 +172,68 @@ async def test_list_get_and_events_are_tenant_scoped() -> None:
         )
 
     assert list_response.status_code == 200
-    assert len(list_response.json()["items"]) == 2
-    assert "nextCursor" not in list_response.json()
+    list_body = list_response.json()
+    assert len(list_body["items"]) == 2
+    assert list_body["total"] == 3
+    assert list_body["limit"] == 2
+    assert list_body["offset"] == 0
+    assert list_body["hasMore"] is True
+    assert "nextCursor" not in list_body
     assert get_response.status_code == 200
     assert get_response.json()["jobId"] == first_job["jobId"]
     assert events_response.status_code == 200
     assert events_response.json()[0]["eventType"] == "SUBMITTED"
     assert cross_tenant_response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_list_jobs_supports_offset_pagination() -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        token = await register_and_login(client)
+        for index in range(5):
+            await create_job(client, token, f"job-{index}")
+
+        first_page_response = await client.get(
+            "/api/v1/jobs",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"limit": 2, "offset": 0},
+        )
+        second_page_response = await client.get(
+            "/api/v1/jobs",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"limit": 2, "offset": 2},
+        )
+        final_page_response = await client.get(
+            "/api/v1/jobs",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"limit": 2, "offset": 4},
+        )
+
+    assert first_page_response.status_code == 200
+    first_page = first_page_response.json()
+    assert len(first_page["items"]) == 2
+    assert first_page["total"] == 5
+    assert first_page["limit"] == 2
+    assert first_page["offset"] == 0
+    assert first_page["hasMore"] is True
+
+    second_page = second_page_response.json()
+    assert len(second_page["items"]) == 2
+    assert second_page["total"] == 5
+    assert second_page["offset"] == 2
+    assert second_page["hasMore"] is True
+    assert {job["jobId"] for job in first_page["items"]}.isdisjoint(
+        {job["jobId"] for job in second_page["items"]}
+    )
+
+    final_page = final_page_response.json()
+    assert len(final_page["items"]) == 1
+    assert final_page["total"] == 5
+    assert final_page["offset"] == 4
+    assert final_page["hasMore"] is False
 
 
 @pytest.mark.anyio

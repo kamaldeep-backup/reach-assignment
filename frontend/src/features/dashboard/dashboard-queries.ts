@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query"
 
 import {
   createApiKey,
@@ -16,27 +21,38 @@ import {
 
 export const jobsQueryKey = ["jobs"] as const
 export const apiKeysQueryKey = ["api-keys"] as const
+export const JOBS_PAGE_SIZE = 10
 
 export function useDashboardData({
   token,
   statusFilter,
+  jobsPage,
   selectedJobId,
 }: {
   token: string
   statusFilter: JobStatusFilter
+  jobsPage: number
   selectedJobId: string | null
 }) {
   const queryClient = useQueryClient()
+  const jobsOffset = (jobsPage - 1) * JOBS_PAGE_SIZE
 
   const jobsQuery = useQuery({
-    queryKey: [...jobsQueryKey, statusFilter],
-    queryFn: () => listJobs({ token, status: statusFilter }),
+    queryKey: [...jobsQueryKey, statusFilter, jobsPage, JOBS_PAGE_SIZE],
+    queryFn: () =>
+      listJobs({
+        token,
+        status: statusFilter,
+        limit: JOBS_PAGE_SIZE,
+        offset: jobsOffset,
+      }),
+    placeholderData: keepPreviousData,
     refetchInterval: 5_000,
   })
 
   const overviewJobsQuery = useQuery({
     queryKey: [...jobsQueryKey, "overview"],
-    queryFn: () => listJobs({ token, status: "ALL" }),
+    queryFn: () => listJobs({ token, status: "ALL", limit: 100 }),
     refetchInterval: 5_000,
   })
 

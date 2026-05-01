@@ -1,7 +1,7 @@
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Job, JobEvent, JobStatus
@@ -40,6 +40,7 @@ async def list_tenant_jobs(
     tenant_id: uuid.UUID,
     status_filter: JobStatus | None,
     limit: int,
+    offset: int,
 ) -> list[Job]:
     conditions = [Job.tenant_id == tenant_id]
     if status_filter is not None:
@@ -49,9 +50,26 @@ async def list_tenant_jobs(
         select(Job)
         .where(*conditions)
         .order_by(Job.created_at.desc(), Job.id.desc())
+        .offset(offset)
         .limit(limit)
     )
     return list(result.scalars().all())
+
+
+async def count_tenant_jobs(
+    *,
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+    status_filter: JobStatus | None,
+) -> int:
+    conditions = [Job.tenant_id == tenant_id]
+    if status_filter is not None:
+        conditions.append(Job.status == status_filter)
+
+    result = await db_session.execute(
+        select(func.count()).select_from(Job).where(*conditions)
+    )
+    return int(result.scalar_one())
 
 
 async def create_job(

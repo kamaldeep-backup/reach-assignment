@@ -155,6 +155,10 @@ class JobResponse(CamelModel):
 
 class JobListResponse(CamelModel):
     items: list[JobResponse]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool = Field(alias="hasMore")
 
 
 class JobEventResponse(CamelModel):

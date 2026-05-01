@@ -36,6 +36,10 @@ export type JobResponse = {
 
 export type JobListResponse = {
   items: JobResponse[]
+  total: number
+  limit: number
+  offset: number
+  hasMore: boolean
 }
 
 export type JobEventResponse = {
@@ -58,14 +62,17 @@ export type JobCreateRequest = {
 export async function listJobs({
   token,
   status,
-  limit = 100,
+  limit = 50,
+  offset = 0,
 }: {
   token: string
   status: JobStatusFilter
   limit?: number
+  offset?: number
 }) {
   const params = new URLSearchParams()
   params.set("limit", String(limit))
+  params.set("offset", String(offset))
 
   if (status !== "ALL") {
     params.set("status", status)

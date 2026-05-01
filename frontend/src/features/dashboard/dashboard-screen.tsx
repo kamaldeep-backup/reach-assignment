@@ -16,7 +16,10 @@ import {
   type Metric,
 } from "@/features/dashboard/components/dashboard-metrics"
 import { WorkspaceLimitsCard } from "@/features/dashboard/components/workspace-limits-card"
-import { useDashboardData } from "@/features/dashboard/dashboard-queries"
+import {
+  JOBS_PAGE_SIZE,
+  useDashboardData,
+} from "@/features/dashboard/dashboard-queries"
 import { getJobCounts } from "@/features/dashboard/dashboard-utils"
 import { JobDetailsDialog } from "@/features/dashboard/jobs/job-details-dialog"
 import { JobSubmitCard } from "@/features/dashboard/jobs/job-submit-card"
@@ -41,6 +44,7 @@ export function DashboardScreen({
   token,
 }: DashboardScreenProps) {
   const [statusFilter, setStatusFilter] = useState<JobStatusFilter>("ALL")
+  const [jobsPage, setJobsPage] = useState(1)
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
   const [copiedValue, setCopiedValue] = useState<string | null>(null)
 
@@ -52,9 +56,10 @@ export function DashboardScreen({
     jobsQuery,
     overviewJobsQuery,
     revokeApiKeyMutation,
-  } = useDashboardData({ token, statusFilter, selectedJobId })
+  } = useDashboardData({ token, statusFilter, jobsPage, selectedJobId })
 
   const jobs = useMemo(() => jobsQuery.data?.items ?? [], [jobsQuery.data])
+  const jobsTotal = jobsQuery.data?.total ?? 0
   const overviewJobs = useMemo(
     () => overviewJobsQuery.data?.items ?? [],
     [overviewJobsQuery.data]
@@ -128,8 +133,17 @@ export function DashboardScreen({
             <JobsCard
               jobs={jobs}
               isLoading={jobsQuery.isLoading}
+              isFetching={jobsQuery.isFetching}
+              page={jobsPage}
+              pageSize={JOBS_PAGE_SIZE}
               statusFilter={statusFilter}
-              onStatusFilterChange={setStatusFilter}
+              totalJobs={jobsTotal}
+              hasNextPage={jobsQuery.data?.hasMore ?? false}
+              onPageChange={setJobsPage}
+              onStatusFilterChange={(nextStatusFilter) => {
+                setStatusFilter(nextStatusFilter)
+                setJobsPage(1)
+              }}
               onRefresh={() => {
                 void jobsQuery.refetch()
                 void overviewJobsQuery.refetch()

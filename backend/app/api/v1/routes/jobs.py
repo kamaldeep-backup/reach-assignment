@@ -172,6 +172,7 @@ async def list_jobs(
     db_session: Annotated[AsyncSession, Depends(get_db_session)],
     status_filter: Annotated[JobStatus | None, Query(alias="status")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> JobListResponse:
     require_api_key_scope(current_context, "jobs:read")
     jobs = await jobs_repository.list_tenant_jobs(
@@ -179,8 +180,20 @@ async def list_jobs(
         tenant_id=current_context.tenant.id,
         status_filter=status_filter,
         limit=limit,
+        offset=offset,
     )
-    return JobListResponse(items=[serialize_job(job) for job in jobs])
+    total = await jobs_repository.count_tenant_jobs(
+        db_session=db_session,
+        tenant_id=current_context.tenant.id,
+        status_filter=status_filter,
+    )
+    return JobListResponse(
+        items=[serialize_job(job) for job in jobs],
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=offset + len(jobs) < total,
+    )
 
 
 @router.get("/{job_id}", response_model=JobResponse)
