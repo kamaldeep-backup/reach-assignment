@@ -1,15 +1,16 @@
 import { ChevronLeftIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react"
 
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
   CardAction,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import type { JobStatusStreamState } from "@/features/dashboard/use-job-status-stream"
 import { JobsTable } from "@/features/dashboard/jobs/jobs-table"
 import { JOB_STATUSES, type JobResponse, type JobStatusFilter } from "@/lib/jobs-api"
 
@@ -20,6 +21,7 @@ type JobsCardProps = {
   page: number
   pageSize: number
   statusFilter: JobStatusFilter
+  streamState: JobStatusStreamState
   totalJobs: number
   hasNextPage: boolean
   onPageChange: (page: number) => void
@@ -43,6 +45,7 @@ export function JobsCard({
   page,
   pageSize,
   statusFilter,
+  streamState,
   totalJobs,
   hasNextPage,
   onPageChange,
@@ -58,10 +61,10 @@ export function JobsCard({
     <Card className="min-w-0">
       <CardHeader>
         <CardTitle>Jobs</CardTitle>
-        <CardDescription>
-          Polls the backend jobs API every five seconds.
-        </CardDescription>
-        <CardAction>
+        <CardAction className="flex items-center gap-2">
+          <Badge variant={streamState === "connected" ? "secondary" : "outline"}>
+            {streamState === "connected" ? "Live" : "Connecting"}
+          </Badge>
           <Button variant="outline" size="sm" onClick={onRefresh}>
             <RefreshCwIcon data-icon="inline-start" />
             Refresh

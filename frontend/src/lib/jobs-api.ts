@@ -1,5 +1,6 @@
 import {
   API_PREFIX,
+  API_ORIGIN,
   getBearerHeaders,
   readApiResponse,
 } from "@/lib/api-client"
@@ -52,6 +53,16 @@ export type JobEventResponse = {
   metadata: Record<string, unknown>
   createdAt: string
 }
+
+export type JobStreamMessage =
+  | {
+      type: "connected" | "pong"
+    }
+  | {
+      type: "job.event"
+      job: JobResponse
+      event: JobEventResponse
+    }
 
 export type JobCreateRequest = {
   type: string
@@ -119,4 +130,11 @@ export async function listJobEvents({
   })
 
   return readApiResponse<JobEventResponse[]>(response)
+}
+
+export function getJobsStreamUrl(token: string) {
+  const url = new URL(`${API_ORIGIN}/api/v1/jobs/stream`)
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
+  url.searchParams.set("token", token)
+  return url.toString()
 }

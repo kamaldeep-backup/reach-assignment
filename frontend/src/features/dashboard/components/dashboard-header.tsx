@@ -1,6 +1,5 @@
-import { LogOutIcon, ShieldCheckIcon } from "lucide-react"
+import { LogOutIcon } from "lucide-react"
 
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import type { CurrentUserResponse } from "@/lib/auth-api"
 
@@ -34,10 +33,6 @@ export function DashboardHeader({
       </div>
 
       <div className="flex items-center gap-2">
-        <Badge variant="outline">
-          <ShieldCheckIcon data-icon="inline-start" />
-          {currentUser?.tenant.role ?? "owner"}
-        </Badge>
         <Button variant="outline" onClick={onLogout}>
           <LogOutIcon data-icon="inline-start" />
           Logout

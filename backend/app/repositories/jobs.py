@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func, select
@@ -137,3 +138,23 @@ async def list_job_events(
         .order_by(JobEvent.created_at.asc(), JobEvent.id.asc())
     )
     return list(result.scalars().all())
+
+
+async def list_tenant_job_events_after(
+    *,
+    db_session: AsyncSession,
+    tenant_id: uuid.UUID,
+    after_created_at: datetime,
+    limit: int,
+) -> list[tuple[JobEvent, Job]]:
+    result = await db_session.execute(
+        select(JobEvent, Job)
+        .join(Job, Job.id == JobEvent.job_id)
+        .where(
+            JobEvent.tenant_id == tenant_id,
+            JobEvent.created_at > after_created_at,
+        )
+        .order_by(JobEvent.created_at.asc(), JobEvent.id.asc())
+        .limit(limit)
+    )
+    return list(result.all())

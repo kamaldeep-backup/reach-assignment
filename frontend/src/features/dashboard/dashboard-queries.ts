@@ -47,13 +47,11 @@ export function useDashboardData({
         offset: jobsOffset,
       }),
     placeholderData: keepPreviousData,
-    refetchInterval: 5_000,
   })
 
   const overviewJobsQuery = useQuery({
     queryKey: [...jobsQueryKey, "overview"],
     queryFn: () => listJobs({ token, status: "ALL", limit: 100 }),
-    refetchInterval: 5_000,
   })
 
   const apiKeysQuery = useQuery({

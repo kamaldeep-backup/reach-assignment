@@ -24,6 +24,7 @@ import { getJobCounts } from "@/features/dashboard/dashboard-utils"
 import { JobDetailsDialog } from "@/features/dashboard/jobs/job-details-dialog"
 import { JobSubmitCard } from "@/features/dashboard/jobs/job-submit-card"
 import { JobsCard } from "@/features/dashboard/jobs/jobs-card"
+import { useJobStatusStream } from "@/features/dashboard/use-job-status-stream"
 import { getErrorMessage } from "@/lib/api-client"
 import type { CurrentUserResponse } from "@/lib/auth-api"
 import type { JobStatusFilter } from "@/lib/jobs-api"
@@ -47,6 +48,7 @@ export function DashboardScreen({
   const [jobsPage, setJobsPage] = useState(1)
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
   const [copiedValue, setCopiedValue] = useState<string | null>(null)
+  const jobStatusStreamState = useJobStatusStream({ token })
 
   const {
     apiKeysQuery,
@@ -137,6 +139,7 @@ export function DashboardScreen({
               page={jobsPage}
               pageSize={JOBS_PAGE_SIZE}
               statusFilter={statusFilter}
+              streamState={jobStatusStreamState}
               totalJobs={jobsTotal}
               hasNextPage={jobsQuery.data?.hasMore ?? false}
               onPageChange={setJobsPage}
