@@ -1,6 +1,6 @@
-import { AccountPanel } from "@/features/auth/account-panel"
 import { AuthScreen } from "@/features/auth/auth-screen"
 import { useAuth } from "@/features/auth/auth-queries"
+import { DashboardScreen } from "@/features/dashboard/dashboard-screen"
 
 export function App() {
   const {
@@ -9,14 +9,16 @@ export function App() {
     loginMutation,
     logout,
     signupMutation,
+    token,
   } = useAuth()
 
-  return isAuthenticated ? (
-    <AccountPanel
+  return isAuthenticated && token ? (
+    <DashboardScreen
       currentUser={currentUserQuery.data}
       error={currentUserQuery.error}
       isLoading={currentUserQuery.isLoading}
       onLogout={logout}
+      token={token}
     />
   ) : (
     <AuthScreen
