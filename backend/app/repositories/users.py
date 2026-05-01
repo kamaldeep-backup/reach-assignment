@@ -4,7 +4,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Tenant, TenantUser, User
+from app.models import Tenant, TenantRuntimeQuota, TenantUser, User
 
 
 async def create_user_with_tenant(
@@ -20,7 +20,8 @@ async def create_user_with_tenant(
     await db_session.flush()
 
     membership = TenantUser(tenant_id=tenant.id, user_id=user.id, role="owner")
-    db_session.add(membership)
+    runtime_quota = TenantRuntimeQuota(tenant_id=tenant.id)
+    db_session.add_all([membership, runtime_quota])
     await db_session.flush()
     return user, tenant, membership
 
