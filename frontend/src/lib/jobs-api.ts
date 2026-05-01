@@ -1,0 +1,115 @@
+import {
+  API_PREFIX,
+  getBearerHeaders,
+  readApiResponse,
+} from "@/lib/api-client"
+
+export const JOB_STATUSES = [
+  "PENDING",
+  "RUNNING",
+  "SUCCEEDED",
+  "FAILED",
+  "DEAD_LETTERED",
+  "CANCELLED",
+] as const
+
+export type JobStatus = (typeof JOB_STATUSES)[number]
+export type JobStatusFilter = "ALL" | JobStatus
+
+export type JobResponse = {
+  jobId: string
+  idempotencyKey: string
+  type: string
+  payload: Record<string, unknown>
+  status: JobStatus
+  priority: number
+  attempts: number
+  maxAttempts: number
+  runAfter: string
+  leaseExpiresAt: string | null
+  lockedBy: string | null
+  lastError: string | null
+  createdAt: string
+  updatedAt: string
+  completedAt: string | null
+}
+
+export type JobListResponse = {
+  items: JobResponse[]
+}
+
+export type JobEventResponse = {
+  eventId: string
+  jobId: string
+  eventType: string
+  fromStatus: JobStatus | null
+  toStatus: JobStatus | null
+  message: string | null
+  metadata: Record<string, unknown>
+  createdAt: string
+}
+
+export type JobCreateRequest = {
+  type: string
+  payload: Record<string, unknown>
+  priority: number
+}
+
+export async function listJobs({
+  token,
+  status,
+  limit = 100,
+}: {
+  token: string
+  status: JobStatusFilter
+  limit?: number
+}) {
+  const params = new URLSearchParams()
+  params.set("limit", String(limit))
+
+  if (status !== "ALL") {
+    params.set("status", status)
+  }
+
+  const response = await fetch(`${API_PREFIX}/jobs?${params.toString()}`, {
+    headers: getBearerHeaders(token),
+  })
+
+  return readApiResponse<JobListResponse>(response)
+}
+
+export async function createJob({
+  token,
+  idempotencyKey,
+  payload,
+}: {
+  token: string
+  idempotencyKey: string
+  payload: JobCreateRequest
+}) {
+  const response = await fetch(`${API_PREFIX}/jobs`, {
+    method: "POST",
+    headers: {
+      ...getBearerHeaders(token),
+      "Content-Type": "application/json",
+      "Idempotency-Key": idempotencyKey,
+    },
+    body: JSON.stringify(payload),
+  })
+
+  return readApiResponse<JobResponse>(response)
+}
+
+export async function listJobEvents({
+  token,
+  jobId,
+}: {
+  token: string
+  jobId: string
+}) {
+  const response = await fetch(`${API_PREFIX}/jobs/${jobId}/events`, {
+    headers: getBearerHeaders(token),
+  })
+
+  return readApiResponse<JobEventResponse[]>(response)
+}
