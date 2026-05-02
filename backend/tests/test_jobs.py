@@ -2,23 +2,48 @@ import uuid
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text, update
 
 from app.core.database import AsyncSessionLocal, dispose_database_engine
 from app.main import app
-from app.models import APIKey, Job, JobEvent, JobStatus, Tenant, TenantUser, User
+from app.models import (
+    APIKey,
+    Job,
+    JobEvent,
+    JobStatus,
+    Tenant,
+    TenantSubmissionRateLimit,
+    TenantUser,
+    User,
+)
 
 
 @pytest.fixture(autouse=True)
 async def clean_tables() -> None:
     await dispose_database_engine()
     async with AsyncSessionLocal() as session:
-        for model in (JobEvent, Job, APIKey, TenantUser, User, Tenant):
+        for model in (
+            JobEvent,
+            Job,
+            TenantSubmissionRateLimit,
+            APIKey,
+            TenantUser,
+            User,
+            Tenant,
+        ):
             await session.execute(delete(model))
         await session.commit()
     yield
     async with AsyncSessionLocal() as session:
-        for model in (JobEvent, Job, APIKey, TenantUser, User, Tenant):
+        for model in (
+            JobEvent,
+            Job,
+            TenantSubmissionRateLimit,
+            APIKey,
+            TenantUser,
+            User,
+            Tenant,
+        ):
             await session.execute(delete(model))
         await session.commit()
     await dispose_database_engine()
@@ -138,6 +163,131 @@ async def test_create_job_requires_auth_and_idempotency_then_records_submission(
     assert job_count == 1
     assert event.event_type == "SUBMITTED"
     assert event.to_status == JobStatus.PENDING
+
+
+@pytest.mark.anyio
+async def test_create_job_enforces_tenant_submit_rate_limit() -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        token = await register_and_login(client)
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(Tenant)
+                .where(Tenant.name == "Acme Corp")
+                .values(submit_rate_limit=2)
+            )
+            await session.commit()
+
+        first_response = await client.post(
+            "/api/v1/jobs",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "limited-1",
+            },
+            json={"type": "send_email", "payload": {"to": "customer@example.com"}},
+        )
+        second_response = await client.post(
+            "/api/v1/jobs",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "limited-2",
+            },
+            json={"type": "send_email", "payload": {"to": "customer@example.com"}},
+        )
+        duplicate_response = await client.post(
+            "/api/v1/jobs",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "limited-1",
+            },
+            json={"type": "ignored", "payload": {"ignored": True}},
+        )
+        limited_response = await client.post(
+            "/api/v1/jobs",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "limited-3",
+            },
+            json={"type": "send_email", "payload": {"to": "customer@example.com"}},
+        )
+
+    assert first_response.status_code == 202
+    assert second_response.status_code == 202
+    assert duplicate_response.status_code == 202
+    assert duplicate_response.json()["jobId"] == first_response.json()["jobId"]
+    assert limited_response.status_code == 429
+    assert limited_response.json()["detail"] == "Tenant submission rate limit exceeded"
+    assert 1 <= int(limited_response.headers["Retry-After"]) <= 60
+
+    async with AsyncSessionLocal() as session:
+        job_count = await session.scalar(select(func.count()).select_from(Job))
+        counter = (await session.execute(select(TenantSubmissionRateLimit))).scalar_one()
+
+    assert job_count == 2
+    assert counter.submitted_count == 2
+
+
+@pytest.mark.anyio
+async def test_tenant_submit_rate_limit_resets_on_next_fixed_window() -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        token = await register_and_login(client)
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(Tenant)
+                .where(Tenant.name == "Acme Corp")
+                .values(submit_rate_limit=1)
+            )
+            await session.commit()
+
+        first_response = await client.post(
+            "/api/v1/jobs",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "window-1",
+            },
+            json={"type": "send_email", "payload": {"to": "customer@example.com"}},
+        )
+        limited_response = await client.post(
+            "/api/v1/jobs",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "window-2",
+            },
+            json={"type": "send_email", "payload": {"to": "customer@example.com"}},
+        )
+
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(TenantSubmissionRateLimit).values(
+                    window_start=func.now() - text("interval '1 minute'")
+                )
+            )
+            await session.commit()
+
+        next_window_response = await client.post(
+            "/api/v1/jobs",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "window-2",
+            },
+            json={"type": "send_email", "payload": {"to": "customer@example.com"}},
+        )
+
+    assert first_response.status_code == 202
+    assert limited_response.status_code == 429
+    assert next_window_response.status_code == 202
+
+    async with AsyncSessionLocal() as session:
+        job_count = await session.scalar(select(func.count()).select_from(Job))
+        counter = (await session.execute(select(TenantSubmissionRateLimit))).scalar_one()
+
+    assert job_count == 2
+    assert counter.submitted_count == 1
 
 
 @pytest.mark.anyio

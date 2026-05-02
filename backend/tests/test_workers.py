@@ -13,6 +13,7 @@ from app.models import (
     JobStatus,
     Tenant,
     TenantRuntimeQuota,
+    TenantSubmissionRateLimit,
     TenantUser,
     User,
 )
@@ -36,6 +37,7 @@ async def clean_worker_tables() -> None:
             JobEvent,
             Job,
             TenantRuntimeQuota,
+            TenantSubmissionRateLimit,
             APIKey,
             TenantUser,
             User,
@@ -50,6 +52,7 @@ async def clean_worker_tables() -> None:
             JobEvent,
             Job,
             TenantRuntimeQuota,
+            TenantSubmissionRateLimit,
             APIKey,
             TenantUser,
             User,

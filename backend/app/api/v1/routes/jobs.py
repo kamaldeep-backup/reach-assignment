@@ -27,6 +27,7 @@ from app.schemas import (
     JobListResponse,
     JobResponse,
 )
+from app.services.submission_rate_limits import reserve_submission_slot
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -134,6 +135,17 @@ async def create_job(
     )
     if existing_job is not None:
         return serialize_job(existing_job)
+
+    rate_limit_result = await reserve_submission_slot(
+        db_session=db_session,
+        tenant_id=tenant_id,
+    )
+    if not rate_limit_result.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Tenant submission rate limit exceeded",
+            headers={"Retry-After": str(rate_limit_result.retry_after_seconds or 60)},
+        )
 
     try:
         job = await jobs_repository.create_job(

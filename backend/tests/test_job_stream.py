@@ -11,6 +11,7 @@ from app.models import (
     JobStatus,
     Tenant,
     TenantRuntimeQuota,
+    TenantSubmissionRateLimit,
     TenantUser,
     User,
 )
@@ -32,6 +33,7 @@ async def _clean_tables() -> None:
             JobEvent,
             Job,
             TenantRuntimeQuota,
+            TenantSubmissionRateLimit,
             APIKey,
             TenantUser,
             User,

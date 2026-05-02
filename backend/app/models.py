@@ -68,6 +68,9 @@ class Tenant(Base):
     runtime_quota: Mapped["TenantRuntimeQuota"] = relationship(
         back_populates="tenant", cascade="all, delete-orphan", uselist=False
     )
+    submission_rate_counter: Mapped["TenantSubmissionRateLimit"] = relationship(
+        back_populates="tenant", cascade="all, delete-orphan", uselist=False
+    )
     dead_letter_jobs: Mapped[list["DeadLetterJob"]] = relationship(
         back_populates="tenant", cascade="all, delete-orphan"
     )
@@ -291,6 +294,33 @@ class TenantRuntimeQuota(Base):
     )
 
     tenant: Mapped[Tenant] = relationship(back_populates="runtime_quota")
+
+
+class TenantSubmissionRateLimit(Base):
+    __tablename__ = "tenant_submission_rate_limits"
+    __table_args__ = (
+        CheckConstraint(
+            "submitted_count >= 0",
+            name="ck_tenant_submission_rate_limits_submitted_count",
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    window_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    submitted_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="submission_rate_counter")
 
 
 class DeadLetterJob(Base):
