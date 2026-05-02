@@ -1,4 +1,9 @@
-import { ChevronLeftIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react"
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  PlusIcon,
+  RefreshCwIcon,
+} from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -24,6 +29,7 @@ type JobsCardProps = {
   streamState: JobStatusStreamState
   totalJobs: number
   hasNextPage: boolean
+  onCreateJob: () => void
   onPageChange: (page: number) => void
   onStatusFilterChange: (status: JobStatusFilter) => void
   onRefresh: () => void
@@ -48,6 +54,7 @@ export function JobsCard({
   streamState,
   totalJobs,
   hasNextPage,
+  onCreateJob,
   onPageChange,
   onStatusFilterChange,
   onRefresh,
@@ -65,6 +72,10 @@ export function JobsCard({
           <Badge variant={streamState === "connected" ? "secondary" : "outline"}>
             {streamState === "connected" ? "Live" : "Connecting"}
           </Badge>
+          <Button size="sm" onClick={onCreateJob}>
+            <PlusIcon data-icon="inline-start" />
+            Create job
+          </Button>
           <Button variant="outline" size="sm" onClick={onRefresh}>
             <RefreshCwIcon data-icon="inline-start" />
             Refresh
