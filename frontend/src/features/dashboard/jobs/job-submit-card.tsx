@@ -19,12 +19,17 @@ import {
   FieldLabel,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
 import { Textarea } from "@/components/ui/textarea"
-import {
-  makeIdempotencyKey,
-  samplePayload,
-} from "@/features/dashboard/dashboard-utils"
+import { makeIdempotencyKey } from "@/features/dashboard/dashboard-utils"
 import { getErrorMessage } from "@/lib/api-client"
 
 type JobSubmitPayload = {
@@ -40,16 +45,51 @@ type JobSubmitCardProps = {
   onSubmit: (payload: JobSubmitPayload) => void
 }
 
+const SUPPORTED_JOB_TYPES = [
+  "noop",
+  "send_email",
+  "webhook",
+  "fail_once",
+] as const
+
+type SupportedJobType = (typeof SUPPORTED_JOB_TYPES)[number]
+
+const JOB_PAYLOAD_SAMPLES: Record<SupportedJobType, Record<string, unknown>> = {
+  noop: {
+    message: "No-op dashboard test",
+  },
+  send_email: {
+    to: "customer@example.com",
+    template: "welcome",
+  },
+  webhook: {
+    url: "https://example.com/webhook",
+    event: "dashboard.test",
+  },
+  fail_once: {
+    message: "Retry demonstration",
+  },
+}
+
+function formatPayloadSample(jobType: SupportedJobType) {
+  return JSON.stringify(JOB_PAYLOAD_SAMPLES[jobType], null, 2)
+}
+
 export function JobSubmitCard({
   isPending,
   error,
   onSubmit,
 }: JobSubmitCardProps) {
   const [idempotencyKey, setIdempotencyKey] = useState(makeIdempotencyKey)
-  const [jobType, setJobType] = useState("noop")
+  const [jobType, setJobType] = useState<SupportedJobType>("noop")
   const [priority, setPriority] = useState("0")
-  const [payloadText, setPayloadText] = useState(samplePayload)
+  const [payloadText, setPayloadText] = useState(formatPayloadSample("noop"))
   const [formError, setFormError] = useState<string | null>(null)
+
+  const handleJobTypeChange = (nextJobType: SupportedJobType) => {
+    setJobType(nextJobType)
+    setPayloadText(formatPayloadSample(nextJobType))
+  }
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -107,13 +147,25 @@ export function JobSubmitCard({
 
             <Field>
               <FieldLabel htmlFor="job-type">Type</FieldLabel>
-              <Input
-                id="job-type"
+              <Select
                 value={jobType}
-                onChange={(event) => setJobType(event.target.value)}
+                onValueChange={handleJobTypeChange}
                 required
                 disabled={isPending}
-              />
+              >
+                <SelectTrigger id="job-type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {SUPPORTED_JOB_TYPES.map((type) => (
+                      <SelectItem key={type} value={type}>
+                        {type}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             </Field>
 
             <div className="grid gap-4 sm:grid-cols-[1fr_8rem]">

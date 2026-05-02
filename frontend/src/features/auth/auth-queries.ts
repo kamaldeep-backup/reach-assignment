@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useState } from "react"
+import { useCallback, useState } from "react"
 
 import {
   clearStoredToken,
@@ -13,6 +13,7 @@ import {
   type RegisterRequest,
   type TokenResponse,
 } from "@/lib/auth-api"
+import { ApiError } from "@/lib/api-client"
 
 export const currentUserQueryKey = ["auth", "current-user"] as const
 
@@ -20,16 +21,36 @@ export function useAuth() {
   const queryClient = useQueryClient()
   const [token, setToken] = useState(() => getStoredToken())
 
+  const clearAuth = useCallback(() => {
+    clearStoredToken()
+    setToken(null)
+    queryClient.setQueryData<CurrentUserResponse | undefined>(
+      currentUserQueryKey,
+      undefined
+    )
+    queryClient.removeQueries({ queryKey: currentUserQueryKey })
+  }, [queryClient])
+
   const currentUserQuery = useQuery({
     queryKey: currentUserQueryKey,
-    queryFn: () => getCurrentUser(token ?? ""),
+    queryFn: async () => {
+      try {
+        return await getCurrentUser(token ?? "")
+      } catch (error) {
+        if (isAuthError(error)) {
+          clearAuth()
+        }
+        throw error
+      }
+    },
     enabled: token !== null,
+    retry: (failureCount, error) => !isAuthError(error) && failureCount < 3,
   })
 
-  const applyToken = (response: TokenResponse) => {
+  const applyToken = useCallback((response: TokenResponse) => {
     storeToken(response.access_token)
     setToken(response.access_token)
-  }
+  }, [])
 
   const loginMutation = useMutation({
     mutationFn: (payload: LoginRequest) => login(payload),
@@ -50,22 +71,16 @@ export function useAuth() {
     },
   })
 
-  const logout = () => {
-    clearStoredToken()
-    setToken(null)
-    queryClient.setQueryData<CurrentUserResponse | undefined>(
-      currentUserQueryKey,
-      undefined
-    )
-    queryClient.removeQueries({ queryKey: currentUserQueryKey })
-  }
-
   return {
     currentUserQuery,
     isAuthenticated: token !== null,
     loginMutation,
-    logout,
+    logout: clearAuth,
     signupMutation,
     token,
   }
+}
+
+function isAuthError(error: unknown) {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403)
 }
