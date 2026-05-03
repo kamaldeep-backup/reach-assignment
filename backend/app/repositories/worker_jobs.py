@@ -1,13 +1,21 @@
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import DeadLetterJob, Job, JobEvent, JobStatus
+from app.models import (
+    DeadLetterJob,
+    Job,
+    JobEvent,
+    JobStatus,
+    Tenant,
+    TenantRuntimeQuota,
+)
 from app.observability.metrics import (
     record_job_claimed,
     record_job_dead_lettered,
@@ -45,9 +53,15 @@ async def claim_pending_job(
     now = datetime.now(UTC)
     result = await db_session.execute(
         select(Job)
-        .where(Job.status == JobStatus.PENDING, Job.run_after <= now)
+        .join(Tenant, Tenant.id == Job.tenant_id)
+        .outerjoin(TenantRuntimeQuota, TenantRuntimeQuota.tenant_id == Job.tenant_id)
+        .where(
+            Job.status == JobStatus.PENDING,
+            Job.run_after <= now,
+            func.coalesce(TenantRuntimeQuota.running_jobs, 0) < Tenant.max_running_jobs,
+        )
         .order_by(Job.priority.desc(), Job.created_at.asc(), Job.id.asc())
-        .with_for_update(skip_locked=True)
+        .with_for_update(skip_locked=True, of=Job)
         .limit(candidate_limit)
     )
 
@@ -220,7 +234,7 @@ async def recover_expired_leases(
     *,
     db_session: AsyncSession,
     batch_size: int,
-    backoff_seconds: float,
+    backoff_seconds_for_attempt: Callable[[int], float],
 ) -> list[LeaseRecoveryResult]:
     now = datetime.now(UTC)
     result = await db_session.execute(
@@ -270,6 +284,7 @@ async def recover_expired_leases(
             )
             continue
 
+        backoff_seconds = backoff_seconds_for_attempt(job.attempts)
         job.status = JobStatus.PENDING
         job.locked_by = None
         job.lease_expires_at = None

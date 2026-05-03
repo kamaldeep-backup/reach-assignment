@@ -11,7 +11,7 @@ class WorkerSettings(BaseSettings):
     worker_id: str = Field(default_factory=lambda: _default_worker_id())
     worker_poll_interval_seconds: float = 1
     worker_lease_seconds: int = 60
-    worker_batch_size: int = 1
+    worker_batch_size: int = 10
     worker_base_backoff_seconds: float = 2
     worker_max_backoff_seconds: float = 300
     worker_jitter_seconds: float = 3

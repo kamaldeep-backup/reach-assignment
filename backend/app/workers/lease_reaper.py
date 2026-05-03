@@ -18,18 +18,21 @@ async def recover_once(
     settings: WorkerSettings | None = None,
 ) -> list[LeaseRecoveryResult]:
     worker_settings = settings or get_worker_settings()
-    backoff_seconds = calculate_backoff_seconds(
-        attempts=1,
-        base_seconds=worker_settings.worker_base_backoff_seconds,
-        max_seconds=worker_settings.worker_max_backoff_seconds,
-        jitter_seconds=worker_settings.worker_jitter_seconds,
-    )
+
+    def backoff_seconds_for_attempt(attempts: int) -> float:
+        return calculate_backoff_seconds(
+            attempts=attempts,
+            base_seconds=worker_settings.worker_base_backoff_seconds,
+            max_seconds=worker_settings.worker_max_backoff_seconds,
+            jitter_seconds=worker_settings.worker_jitter_seconds,
+        )
+
     async with session_factory() as session:
         async with session.begin():
             recovered = await recover_expired_leases(
                 db_session=session,
                 batch_size=worker_settings.lease_reaper_batch_size,
-                backoff_seconds=backoff_seconds,
+                backoff_seconds_for_attempt=backoff_seconds_for_attempt,
             )
 
     for result in recovered:

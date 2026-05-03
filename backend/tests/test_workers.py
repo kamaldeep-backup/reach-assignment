@@ -349,6 +349,94 @@ async def test_quota_limit_prevents_over_claiming_without_failing_job() -> None:
 
 
 @pytest.mark.anyio
+async def test_default_worker_candidates_skip_saturated_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("WORKER_BATCH_SIZE", raising=False)
+    now = datetime.now(UTC)
+    async with AsyncSessionLocal() as session:
+        saturated_tenant = Tenant(name="Saturated", max_running_jobs=1)
+        available_tenant = Tenant(name="Available", max_running_jobs=1)
+        session.add_all([saturated_tenant, available_tenant])
+        await session.flush()
+        session.add_all(
+            [
+                TenantRuntimeQuota(
+                    tenant_id=saturated_tenant.id,
+                    running_jobs=1,
+                ),
+                TenantRuntimeQuota(tenant_id=available_tenant.id),
+            ]
+        )
+        saturated_running_job = Job(
+            tenant_id=saturated_tenant.id,
+            idempotency_key="saturated-running",
+            job_type="noop",
+            payload={"ok": True},
+            status=JobStatus.RUNNING,
+            locked_by="busy-worker",
+            lease_expires_at=now + timedelta(minutes=1),
+            created_at=now - timedelta(minutes=3),
+        )
+        saturated_pending_jobs = [
+            Job(
+                tenant_id=saturated_tenant.id,
+                idempotency_key=f"saturated-pending-{index}",
+                job_type="noop",
+                payload={"ok": True},
+                run_after=now - timedelta(seconds=1),
+                created_at=now - timedelta(minutes=2) + timedelta(seconds=index),
+            )
+            for index in range(10)
+        ]
+        available_pending_job = Job(
+            tenant_id=available_tenant.id,
+            idempotency_key="available-pending",
+            job_type="noop",
+            payload={"ok": True},
+            run_after=now - timedelta(seconds=1),
+            created_at=now - timedelta(minutes=1),
+        )
+        session.add_all(
+            [saturated_running_job, *saturated_pending_jobs, available_pending_job]
+        )
+        await session.commit()
+        saturated_pending_job_ids = [job.id for job in saturated_pending_jobs]
+
+    settings = WorkerSettings(
+        worker_id="worker-1",
+        worker_lease_seconds=60,
+        worker_base_backoff_seconds=2,
+        worker_max_backoff_seconds=60,
+        worker_jitter_seconds=0,
+        lease_reaper_batch_size=50,
+        _env_file=None,
+    )
+    processed = await process_one_job(settings=settings)
+
+    async with AsyncSessionLocal() as session:
+        saturated_pending_statuses = (
+            await session.execute(
+                select(Job.status).where(Job.id.in_(saturated_pending_job_ids))
+            )
+        ).scalars().all()
+        stored_available_pending = await session.get(Job, available_pending_job.id)
+        saturated_quota = await session.get(TenantRuntimeQuota, saturated_tenant.id)
+        available_quota = await session.get(TenantRuntimeQuota, available_tenant.id)
+
+    assert settings.worker_batch_size == 10
+    assert processed is not None
+    assert processed.id == available_pending_job.id
+    assert saturated_pending_statuses == [JobStatus.PENDING] * 10
+    assert stored_available_pending is not None
+    assert stored_available_pending.status == JobStatus.SUCCEEDED
+    assert saturated_quota is not None
+    assert saturated_quota.running_jobs == 1
+    assert available_quota is not None
+    assert available_quota.running_jobs == 0
+
+
+@pytest.mark.anyio
 async def test_future_run_after_jobs_are_not_claimed() -> None:
     _tenant, job = await create_tenant_and_job(
         run_after=datetime.now(UTC) + timedelta(minutes=5)
@@ -414,6 +502,41 @@ async def test_lease_reaper_requeues_expired_leases_and_rejects_stale_ack() -> N
     assert quota is not None
     assert quota.running_jobs == 0
     assert sorted(event_types) == ["LEASE_EXPIRED", "REQUEUED_FROM_TIMEOUT"]
+
+
+@pytest.mark.anyio
+async def test_lease_reaper_uses_expired_job_attempts_for_backoff() -> None:
+    tenant, job = await create_tenant_and_job(
+        status=JobStatus.RUNNING,
+        attempts=2,
+        max_attempts=3,
+        locked_by="stale-worker",
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    async with AsyncSessionLocal() as session:
+        quota = await session.get(TenantRuntimeQuota, tenant.id)
+        assert quota is not None
+        quota.running_jobs = 1
+        await session.commit()
+
+    recovered = await recover_once(settings=worker_settings())
+
+    async with AsyncSessionLocal() as session:
+        stored_job = await session.get(Job, job.id)
+        retry_event = (
+            await session.execute(
+                select(JobEvent).where(
+                    JobEvent.job_id == job.id,
+                    JobEvent.event_type == "REQUEUED_FROM_TIMEOUT",
+                )
+            )
+        ).scalar_one()
+
+    assert len(recovered) == 1
+    assert stored_job is not None
+    assert stored_job.status == JobStatus.PENDING
+    assert stored_job.run_after - stored_job.updated_at == timedelta(seconds=4)
+    assert retry_event.event_metadata["backoffSeconds"] == 4
 
 
 @pytest.mark.anyio

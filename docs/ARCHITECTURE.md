@@ -442,11 +442,14 @@ Workers claim jobs using `FOR UPDATE SKIP LOCKED`, allowing many worker processe
 ```sql
 SELECT id
 FROM jobs
+JOIN tenants ON tenants.id = jobs.tenant_id
+LEFT JOIN tenant_runtime_quotas q ON q.tenant_id = jobs.tenant_id
 WHERE status = 'PENDING'
   AND run_after <= now()
+  AND COALESCE(q.running_jobs, 0) < tenants.max_running_jobs
 ORDER BY priority DESC, created_at
 FOR UPDATE SKIP LOCKED
-LIMIT 1;
+LIMIT 10;
 ```
 
 After selecting a candidate job, the worker attempts to reserve tenant concurrency and lease the job in the same transaction.

@@ -233,11 +233,14 @@ Example claim query:
 ```sql
 SELECT id, tenant_id, job_type, payload, attempts, max_attempts
 FROM jobs
+JOIN tenants ON tenants.id = jobs.tenant_id
+LEFT JOIN tenant_runtime_quotas q ON q.tenant_id = jobs.tenant_id
 WHERE status = 'PENDING'
   AND run_after <= now()
+  AND COALESCE(q.running_jobs, 0) < tenants.max_running_jobs
 ORDER BY priority DESC, created_at ASC
 FOR UPDATE SKIP LOCKED
-LIMIT 1;
+LIMIT 10;
 ```
 
 Example quota reservation:
@@ -383,14 +386,14 @@ DATABASE_URL=postgresql+asyncpg://reach:reach@postgres:5432/reach
 WORKER_ID=worker-local
 WORKER_POLL_INTERVAL_SECONDS=1
 WORKER_LEASE_SECONDS=60
-WORKER_BATCH_SIZE=1
+WORKER_BATCH_SIZE=10
 WORKER_BASE_BACKOFF_SECONDS=2
 WORKER_MAX_BACKOFF_SECONDS=300
 LEASE_REAPER_INTERVAL_SECONDS=10
 LEASE_REAPER_BATCH_SIZE=50
 ```
 
-If `WORKER_ID` is not set, the process can generate one from hostname, process ID, and a short random suffix.
+If `WORKER_ID` is not set, the process can generate one from hostname, process ID, and a short random suffix. `WORKER_BATCH_SIZE` is the number of eligible claim candidates inspected per poll; each worker still executes one claimed job at a time.
 
 ## Proposed Code Structure
 
