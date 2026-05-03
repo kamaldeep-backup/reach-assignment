@@ -43,6 +43,17 @@ export type JobListResponse = {
   hasMore: boolean
 }
 
+export type MetricsSummaryResponse = {
+  pending: number
+  running: number
+  succeeded: number
+  failed: number
+  deadLettered: number
+  queueDepth: number
+  oldestPendingAgeSeconds: number
+  runningLimit: number
+}
+
 export type JobEventResponse = {
   eventId: string
   jobId: string
@@ -94,6 +105,14 @@ export async function listJobs({
   })
 
   return readApiResponse<JobListResponse>(response)
+}
+
+export async function getMetricsSummary(token: string) {
+  const response = await fetch(`${API_PREFIX}/metrics/summary`, {
+    headers: getBearerHeaders(token),
+  })
+
+  return readApiResponse<MetricsSummaryResponse>(response)
 }
 
 export async function createJob({

@@ -13,6 +13,7 @@ import {
 } from "@/lib/api-keys-api"
 import {
   createJob,
+  getMetricsSummary,
   listJobEvents,
   listJobs,
   type JobCreateRequest,
@@ -22,6 +23,7 @@ import {
 export const jobsQueryKey = ["jobs"] as const
 export const apiKeysQueryKey = ["api-keys"] as const
 export const JOBS_PAGE_SIZE = 10
+export const metricsSummaryQueryKey = [...jobsQueryKey, "metrics-summary"] as const
 
 export function useDashboardData({
   token,
@@ -49,9 +51,9 @@ export function useDashboardData({
     placeholderData: keepPreviousData,
   })
 
-  const overviewJobsQuery = useQuery({
-    queryKey: [...jobsQueryKey, "overview"],
-    queryFn: () => listJobs({ token, status: "ALL", limit: 100 }),
+  const metricsSummaryQuery = useQuery({
+    queryKey: metricsSummaryQueryKey,
+    queryFn: () => getMetricsSummary(token),
   })
 
   const apiKeysQuery = useQuery({
@@ -98,7 +100,7 @@ export function useDashboardData({
     createJobMutation,
     jobEventsQuery,
     jobsQuery,
-    overviewJobsQuery,
+    metricsSummaryQuery,
     revokeApiKeyMutation,
   }
 }

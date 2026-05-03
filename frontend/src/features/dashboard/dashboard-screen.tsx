@@ -44,7 +44,7 @@ import {
   JOBS_PAGE_SIZE,
   useDashboardData,
 } from "@/features/dashboard/dashboard-queries"
-import { formatDate, getJobCounts } from "@/features/dashboard/dashboard-utils"
+import { formatDate } from "@/features/dashboard/dashboard-utils"
 import { JobDetailsDialog } from "@/features/dashboard/jobs/job-details-dialog"
 import { JobSubmitCard } from "@/features/dashboard/jobs/job-submit-card"
 import { JobsCard } from "@/features/dashboard/jobs/jobs-card"
@@ -118,50 +118,50 @@ export function DashboardScreen({
     createJobMutation,
     jobEventsQuery,
     jobsQuery,
-    overviewJobsQuery,
+    metricsSummaryQuery,
     revokeApiKeyMutation,
   } = useDashboardData({ token, statusFilter, jobsPage, selectedJobId })
 
   const jobs = useMemo(() => jobsQuery.data?.items ?? [], [jobsQuery.data])
   const jobsTotal = jobsQuery.data?.total ?? 0
-  const overviewJobs = useMemo(
-    () => overviewJobsQuery.data?.items ?? [],
-    [overviewJobsQuery.data]
-  )
   const selectedJob = jobs.find((job) => job.jobId === selectedJobId)
   const activeKeys = apiKeysQuery.data?.filter((key) => key.isActive).length ?? 0
 
   const metrics = useMemo<Metric[]>(() => {
-    const counts = getJobCounts(overviewJobs)
-    const runningLimit = currentUser?.tenant.maxRunningJobs ?? 0
+    const summary = metricsSummaryQuery.data
+    const runningLimit = summary?.runningLimit ?? currentUser?.tenant.maxRunningJobs ?? 0
+    const oldestPendingAge = summary?.oldestPendingAgeSeconds ?? 0
 
     return [
       {
         label: "Queue depth",
-        value: String(counts.PENDING),
-        detail: "Pending jobs",
+        value: String(summary?.queueDepth ?? 0),
+        detail:
+          oldestPendingAge > 0
+            ? `Oldest pending ${formatDuration(oldestPendingAge)}`
+            : "Pending jobs",
         icon: ClockIcon,
       },
       {
         label: "Running",
-        value: `${counts.RUNNING}/${runningLimit}`,
+        value: `${summary?.running ?? 0}/${runningLimit}`,
         detail: "Tenant concurrency",
         icon: LoaderCircleIcon,
       },
       {
         label: "Completed",
-        value: String(counts.SUCCEEDED),
+        value: String(summary?.succeeded ?? 0),
         detail: "Succeeded jobs",
         icon: CheckCircle2Icon,
       },
       {
         label: "Failures",
-        value: String(counts.FAILED + counts.DEAD_LETTERED),
+        value: String((summary?.failed ?? 0) + (summary?.deadLettered ?? 0)),
         detail: "Failed or DLQ",
         icon: XCircleIcon,
       },
     ]
-  }, [currentUser?.tenant.maxRunningJobs, overviewJobs])
+  }, [currentUser?.tenant.maxRunningJobs, metricsSummaryQuery.data])
 
   const copyText = (value: string) => {
     void navigator.clipboard.writeText(value).then(() => {
@@ -238,7 +238,7 @@ export function DashboardScreen({
                     }}
                     onRefresh={() => {
                       void jobsQuery.refetch()
-                      void overviewJobsQuery.refetch()
+                      void metricsSummaryQuery.refetch()
                     }}
                     onSelectJob={setSelectedJobId}
                   />
@@ -343,6 +343,19 @@ export function DashboardScreen({
       </Dialog>
     </div>
   )
+}
+
+function formatDuration(totalSeconds: number) {
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`
+  }
+
+  const minutes = Math.floor(totalSeconds / 60)
+  if (minutes < 60) {
+    return `${minutes}m`
+  }
+
+  return `${Math.floor(minutes / 60)}h`
 }
 
 function DashboardSidebar({
