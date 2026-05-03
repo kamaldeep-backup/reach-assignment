@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -19,6 +20,13 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 JOB_STREAM_POLL_INTERVAL_SECONDS = 0.5
 JOB_STREAM_BATCH_SIZE = 100
+MIN_JOB_EVENT_ID = uuid.UUID(int=0)
+
+
+@dataclass(frozen=True)
+class JobEventCursor:
+    created_at: datetime
+    event_id: uuid.UUID
 
 
 @router.websocket("/stream")
@@ -53,7 +61,10 @@ async def stream_job_events(
     except WebSocketDisconnect:
         return
 
-    cursor = datetime.now(UTC) - timedelta(seconds=1)
+    cursor = JobEventCursor(
+        created_at=datetime.now(UTC) - timedelta(seconds=1),
+        event_id=MIN_JOB_EVENT_ID,
+    )
 
     while True:
         try:
@@ -79,8 +90,8 @@ async def _send_pending_events(
     *,
     websocket: WebSocket,
     tenant_id: uuid.UUID,
-    cursor: datetime,
-) -> datetime:
+    cursor: JobEventCursor,
+) -> JobEventCursor:
     async with AsyncSessionLocal() as db_session:
         events = await _list_stream_events(
             db_session=db_session,
@@ -96,7 +107,7 @@ async def _send_pending_events(
                 "event": _dump_model(serialize_event(event)),
             }
         )
-        cursor = max(cursor, event.created_at)
+        cursor = JobEventCursor(created_at=event.created_at, event_id=event.id)
 
     return cursor
 
@@ -105,12 +116,13 @@ async def _list_stream_events(
     *,
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
-    cursor: datetime,
+    cursor: JobEventCursor,
 ) -> list[tuple[JobEvent, Job]]:
     return await jobs_repository.list_tenant_job_events_after(
         db_session=db_session,
         tenant_id=tenant_id,
-        after_created_at=cursor,
+        after_created_at=cursor.created_at,
+        after_event_id=cursor.event_id,
         limit=JOB_STREAM_BATCH_SIZE,
     )
 

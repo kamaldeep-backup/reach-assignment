@@ -240,7 +240,7 @@ class JobEvent(Base):
     __tablename__ = "job_events"
     __table_args__ = (
         Index("idx_job_events_job_id", "job_id", "created_at"),
-        Index("idx_job_events_tenant_created", "tenant_id", "created_at"),
+        Index("idx_job_events_tenant_created", "tenant_id", "created_at", "id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

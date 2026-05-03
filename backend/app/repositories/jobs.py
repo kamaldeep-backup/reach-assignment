@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Job, JobEvent, JobStatus
@@ -145,6 +145,7 @@ async def list_tenant_job_events_after(
     db_session: AsyncSession,
     tenant_id: uuid.UUID,
     after_created_at: datetime,
+    after_event_id: uuid.UUID,
     limit: int,
 ) -> list[tuple[JobEvent, Job]]:
     result = await db_session.execute(
@@ -152,7 +153,13 @@ async def list_tenant_job_events_after(
         .join(Job, Job.id == JobEvent.job_id)
         .where(
             JobEvent.tenant_id == tenant_id,
-            JobEvent.created_at > after_created_at,
+            or_(
+                JobEvent.created_at > after_created_at,
+                and_(
+                    JobEvent.created_at == after_created_at,
+                    JobEvent.id > after_event_id,
+                ),
+            ),
         )
         .order_by(JobEvent.created_at.asc(), JobEvent.id.asc())
         .limit(limit)
