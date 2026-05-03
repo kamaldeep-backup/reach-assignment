@@ -158,6 +158,20 @@ DEAD_LETTERED
 CANCELLED
 ```
 
+The current implementation deliberately uses only the states needed for the
+core assignment lifecycle:
+
+```text
+PENDING -> RUNNING -> SUCCEEDED
+PENDING -> RUNNING -> PENDING
+PENDING -> RUNNING -> DEAD_LETTERED
+```
+
+`FAILED` and `CANCELLED` are reserved for future operator workflows. A later
+version could add a cancel endpoint or an explicit terminal failed state, but
+this version keeps worker execution simple: retryable failures are requeued
+with backoff, and exhausted or non-retryable failures are dead-lettered.
+
 Recommended job fields:
 
 ```text
@@ -506,6 +520,12 @@ jobs_succeeded_total{tenant_id,worker_id}
 jobs_retried_total{tenant_id}
 jobs_dead_lettered_total{tenant_id}
 job_lease_expired_total{tenant_id}
+queue_depth{tenant_id,status}
+running_jobs{tenant_id}
+dead_letter_jobs{tenant_id}
+oldest_pending_age_seconds{tenant_id}
+tenant_running_limit{tenant_id}
+tenant_runtime_slots_used{tenant_id}
 job_execution_duration_seconds_bucket{tenant_id,job_type,outcome}
 job_queue_wait_seconds_bucket{tenant_id,job_type}
 ```
@@ -513,6 +533,34 @@ job_queue_wait_seconds_bucket{tenant_id,job_type}
 The API also refreshes database-backed queue gauges during `GET /metrics`, so
 autoscaling and alerting can use authoritative queue depth and queue age rather
 than dashboard samples.
+
+The current implementation does not expose a standalone
+`worker_available_capacity` metric. Capacity is derived from tenant runtime
+quota gauges:
+
+```text
+available tenant slots =
+  max(tenant_running_limit - tenant_runtime_slots_used, 0)
+```
+
+That is intentional for the take-home: each worker process handles one job at a
+time, while tenant concurrency quotas are the control plane that prevents one
+tenant from consuming all worker capacity. A production worker fleet could add
+heartbeats and per-process capacity gauges later.
+
+Example scaling policy for a real deployment:
+
+```text
+Scale out when:
+- sum(queue_depth{status="PENDING"}) > 100 for 3 minutes, or
+- max(oldest_pending_age_seconds) > 60 seconds, or
+- avg(tenant_runtime_slots_used / tenant_running_limit) > 0.8.
+
+Scale in when:
+- sum(queue_depth{status="PENDING"}) < 10 for 10 minutes, and
+- max(oldest_pending_age_seconds) < 10 seconds, and
+- avg(tenant_runtime_slots_used / tenant_running_limit) < 0.3.
+```
 
 ## Testing Strategy
 
@@ -551,12 +599,15 @@ Useful integration test:
 - Unknown `job_type` should be treated as non-retryable and moved to the DLQ.
 - Payloads should not be logged wholesale unless they are known to be safe.
 - The first version should process one job at a time per process; horizontal scaling comes from running more worker processes.
+- Local horizontal scaling can be demonstrated with `docker compose up --scale worker=4`.
+- Kubernetes/ECS autoscaling automation is out of scope; use `queue_depth`, `oldest_pending_age_seconds`, and `tenant_runtime_slots_used / tenant_running_limit` as the documented production scaling inputs.
 
 ## What This Leaves Out
 
 The worker layer does not need to include:
 
 - autoscaling automation
+- a separate worker heartbeat or worker available-capacity metric
 - worker heartbeats separate from lease expiry
 - exactly-once side-effect guarantees
 - distributed tracing in the first pass

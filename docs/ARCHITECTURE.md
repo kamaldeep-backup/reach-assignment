@@ -412,6 +412,22 @@ CREATE INDEX idx_dead_letter_jobs_tenant
 ON dead_letter_jobs (tenant_id, dead_lettered_at DESC);
 ```
 
+The current worker implementation deliberately uses a narrow active state
+machine:
+
+```text
+PENDING -> RUNNING -> SUCCEEDED
+PENDING -> RUNNING -> PENDING         # retry with backoff
+PENDING -> RUNNING -> DEAD_LETTERED   # exhausted or non-retryable failure
+```
+
+`FAILED` and `CANCELLED` are retained in the enum as reserved states. They keep
+the API and schema compatible with future workflows such as manual cancellation,
+operator-forced terminal failure, or a separate "failed but not dead-lettered"
+state. The take-home implementation does not expose cancel endpoints and does
+not set `FAILED` from worker execution; retryable failures are requeued and
+exhausted or non-retryable failures go to `DEAD_LETTERED`.
+
 ## Postgres Queue Design
 
 Jobs are stored in the `jobs` table. A job is eligible for execution when:
@@ -603,43 +619,89 @@ Each tenant has a maximum number of jobs that may run at the same time:
 tenants.max_running_jobs
 ```
 
-Workers increment `tenant_runtime_quotas.running_jobs` before marking a job `RUNNING`. They decrement it when a job succeeds, retries, fails, is cancelled, or is recovered by the lease reaper.
+Workers increment `tenant_runtime_quotas.running_jobs` before marking a job `RUNNING`. They decrement it when a job succeeds, is scheduled for retry, is dead-lettered, or is recovered by the lease reaper.
 
 This prevents one tenant from consuming all workers.
 
 ## Autoscaling Triggers
 
-The take-home can implement autoscaling as metrics and documented scaling rules rather than real infrastructure automation.
+The take-home intentionally implements autoscaling as metrics plus documented
+scaling rules rather than real infrastructure automation. That keeps the scope
+focused on queue correctness, leases, retries, DLQ behavior, quotas, and
+observability while still showing how workers would be scaled in production.
 
-Useful scaling signals:
+Implemented scaling signals:
 
-- `queue_pending_jobs`
-- `queue_oldest_pending_job_age_seconds`
-- `worker_running_jobs`
-- `worker_available_capacity`
-- `job_duration_seconds`
-- `job_retry_total`
-- `job_dead_letter_total`
+- `queue_depth{tenant_id,status="PENDING"}`
+- `oldest_pending_age_seconds{tenant_id}`
+- `running_jobs{tenant_id}`
+- `tenant_running_limit{tenant_id}`
+- `tenant_runtime_slots_used{tenant_id}`
+- `job_execution_duration_seconds_bucket{tenant_id,job_type,outcome}`
+- `jobs_retried_total{tenant_id}`
+- `jobs_dead_lettered_total{tenant_id}`
+
+Queue capacity is exposed through tenant quota gauges instead of a separate
+`worker_available_capacity` metric:
+
+```text
+tenant_available_runtime_slots =
+  max(tenant_running_limit - tenant_runtime_slots_used, 0)
+
+tenant_runtime_utilization =
+  tenant_runtime_slots_used / tenant_running_limit
+```
+
+That is a deliberate simplification. The current system has one-job-at-a-time
+worker processes and tenant-level concurrency quotas, so tenant runtime slots
+are the authoritative capacity signal. A production deployment could add
+process-level worker heartbeats and a separate `worker_available_capacity`
+gauge if workers process multiple jobs concurrently or expose richer health.
 
 Example conceptual policy:
 
 ```text
 Scale out workers when:
-- pending jobs > 100 for 3 minutes, or
-- oldest pending job age > 60 seconds, or
-- worker capacity utilization > 80%.
+- sum(queue_depth{status="PENDING"}) > 100 for 3 minutes, or
+- max(oldest_pending_age_seconds) > 60 seconds, or
+- average tenant_runtime_utilization > 80%.
 
 Scale in workers when:
-- pending jobs < 10 for 10 minutes, and
-- oldest pending job age < 10 seconds, and
-- worker capacity utilization < 30%.
+- sum(queue_depth{status="PENDING"}) < 10 for 10 minutes, and
+- max(oldest_pending_age_seconds) < 10 seconds, and
+- average tenant_runtime_utilization < 30%.
 ```
 
-For Docker Compose, scaling can be demonstrated manually:
+For Docker Compose, scaling is demonstrated manually:
 
 ```bash
 docker compose up --scale worker=4
 ```
+
+For Kubernetes, the equivalent production direction would be an HPA/KEDA-style
+policy using Prometheus metrics. Example rule, expressed conceptually:
+
+```yaml
+scaleTargetRef:
+  name: worker
+triggers:
+  - type: prometheus
+    metric: pending_jobs
+    query: sum(queue_depth{status="PENDING"})
+    threshold: "100"
+  - type: prometheus
+    metric: oldest_pending_age
+    query: max(oldest_pending_age_seconds)
+    threshold: "60"
+  - type: prometheus
+    metric: tenant_runtime_utilization
+    query: avg(tenant_runtime_slots_used / tenant_running_limit)
+    threshold: "0.8"
+```
+
+The repository does not include Kubernetes manifests or KEDA installation
+because that would add deployment-specific infrastructure beyond the assignment
+scope.
 
 ## Observability
 
@@ -669,6 +731,12 @@ tenant_running_limit{tenant_id}
 tenant_runtime_slots_used{tenant_id}
 job_execution_duration_seconds_bucket{tenant_id,job_type,outcome}
 job_queue_wait_seconds_bucket{tenant_id,job_type}
+```
+
+The effective available capacity per tenant is derived as:
+
+```text
+max(tenant_running_limit{tenant_id} - tenant_runtime_slots_used{tenant_id}, 0)
 ```
 
 The dashboard uses `GET /api/v1/metrics/summary` for tenant-scoped operational
@@ -1275,7 +1343,9 @@ Stress test:
 - Access tokens are simple signed bearer tokens instead of a complete OAuth server.
 - Fixed-window rate limiting is used instead of a distributed token bucket.
 - Workers are raw Python loops instead of Celery, Dramatiq, Sidekiq, or Temporal.
-- Autoscaling is documented through metrics and manual Docker Compose scaling.
+- Autoscaling automation is intentionally out of scope; the implementation exposes Prometheus metrics, documents scaling policies, and supports manual Docker Compose scaling.
+- Worker capacity is represented by tenant runtime quota metrics rather than a separate worker-heartbeat capacity model.
+- `FAILED` and `CANCELLED` are reserved job states; the current worker flow retries or dead-letters instead of exposing final-failed or cancel workflows.
 - WebSocket fanout can be backed by polling or Postgres notifications instead of Redis Pub/Sub.
 - Job handlers can be simple demo handlers instead of executing arbitrary untrusted code.
 - The dashboard is minimal but operationally useful.

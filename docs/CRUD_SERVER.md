@@ -672,7 +672,8 @@ Required tests:
 
 ## What This Leaves Out
 
-The basic job API server does not include:
+This document describes the deliberately small baseline CRUD server, not the
+full current queue implementation. The baseline job API server does not include:
 
 - worker execution
 - lease management
@@ -687,6 +688,10 @@ The basic job API server does not include:
 - production metrics stack
 
 Those features are covered by the full architecture in `ARCHITECTURE.md`.
+In the current implementation, autoscaling remains scoped to Prometheus metrics
+and documented/manual scaling rather than Kubernetes or cloud autoscaler
+automation. `FAILED` and `CANCELLED` also remain reserved states rather than
+active worker outcomes.
 
 ## Path From Baseline API To Full Queue
 
