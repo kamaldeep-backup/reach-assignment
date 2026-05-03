@@ -8,6 +8,13 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import DeadLetterJob, Job, JobEvent, JobStatus
+from app.observability.metrics import (
+    record_job_claimed,
+    record_job_dead_lettered,
+    record_job_lease_expired,
+    record_job_retried,
+    record_job_succeeded,
+)
 from app.services.quotas import release_runtime_slot, reserve_runtime_slot
 
 
@@ -69,6 +76,13 @@ async def claim_pending_job(
             )
         )
         await db_session.flush()
+        record_job_claimed(
+            tenant_id=job.tenant_id,
+            worker_id=worker_id,
+            job_type=job.job_type,
+            created_at=job.created_at,
+            claimed_at=now,
+        )
         return ClaimedJob(
             id=job.id,
             tenant_id=job.tenant_id,
@@ -96,6 +110,7 @@ async def mark_job_succeeded(
         return False
 
     now = datetime.now(UTC)
+    claimed_at = job.updated_at
     await release_runtime_slot(db_session=db_session, tenant_id=job.tenant_id)
     job.status = JobStatus.SUCCEEDED
     job.locked_by = None
@@ -114,6 +129,13 @@ async def mark_job_succeeded(
         )
     )
     await db_session.flush()
+    record_job_succeeded(
+        tenant_id=job.tenant_id,
+        worker_id=worker_id,
+        job_type=job.job_type,
+        claimed_at=claimed_at,
+        completed_at=now,
+    )
     return True
 
 
@@ -134,6 +156,7 @@ async def schedule_job_retry(
         return False
 
     now = datetime.now(UTC)
+    claimed_at = job.updated_at
     await release_runtime_slot(db_session=db_session, tenant_id=job.tenant_id)
     job.status = JobStatus.PENDING
     job.locked_by = None
@@ -157,6 +180,12 @@ async def schedule_job_retry(
         )
     )
     await db_session.flush()
+    record_job_retried(
+        tenant_id=job.tenant_id,
+        job_type=job.job_type,
+        claimed_at=claimed_at,
+        finished_at=now,
+    )
     return True
 
 
@@ -205,6 +234,7 @@ async def recover_expired_leases(
     recovered: list[LeaseRecoveryResult] = []
     for job in result.scalars().all():
         await release_runtime_slot(db_session=db_session, tenant_id=job.tenant_id)
+        record_job_lease_expired(job.tenant_id)
         db_session.add(
             JobEvent(
                 job_id=job.id,
@@ -299,6 +329,7 @@ async def _move_locked_job_to_dlq(
     metadata: dict[str, Any],
 ) -> None:
     now = datetime.now(UTC)
+    claimed_at = job.updated_at
     job.status = JobStatus.DEAD_LETTERED
     job.locked_by = None
     job.lease_expires_at = None
@@ -328,3 +359,9 @@ async def _move_locked_job_to_dlq(
         )
     )
     await db_session.flush()
+    record_job_dead_lettered(
+        tenant_id=job.tenant_id,
+        job_type=job.job_type,
+        claimed_at=claimed_at,
+        finished_at=now,
+    )

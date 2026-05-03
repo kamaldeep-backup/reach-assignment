@@ -20,6 +20,7 @@ from app.api.v1.dependencies import (
 )
 from app.core.database import get_db_session
 from app.models import Job, JobEvent, JobStatus
+from app.observability.metrics import record_job_submitted, record_tenant_rate_limited
 from app.repositories import jobs as jobs_repository
 from app.schemas import (
     JobCreateRequest,
@@ -141,6 +142,7 @@ async def create_job(
         tenant_id=tenant_id,
     )
     if not rate_limit_result.allowed:
+        record_tenant_rate_limited(tenant_id)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Tenant submission rate limit exceeded",
@@ -174,6 +176,7 @@ async def create_job(
         to_status=JobStatus.PENDING,
         message="Job submitted",
     )
+    record_job_submitted(tenant_id)
     await jobs_repository.refresh_job(db_session=db_session, job=job)
     return serialize_job(job)
 

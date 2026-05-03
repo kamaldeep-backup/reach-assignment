@@ -52,6 +52,22 @@ curl http://127.0.0.1:8000/api/v1/health
 curl http://127.0.0.1:8000/api/v1/health/database
 ```
 
+## Observability
+
+Prometheus-compatible metrics are exposed without application auth for scrapers:
+
+```bash
+curl http://127.0.0.1:8000/metrics
+```
+
+The authenticated dashboard uses database-backed operational counts instead of
+sampling job rows:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8000/api/v1/metrics/summary
+```
+
 ## Test
 
 ```bash

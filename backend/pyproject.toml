@@ -9,6 +9,7 @@ dependencies = [
     "asyncpg>=0.30.0",
     "email-validator>=2.3.0",
     "fastapi>=0.111.0",
+    "prometheus-client>=0.25.0",
     "psycopg2-binary>=2.9.12",
     "pwdlib[argon2]>=0.3.0",
     "pydantic-settings>=2.7.0",

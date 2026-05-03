@@ -170,3 +170,14 @@ class JobEventResponse(CamelModel):
     message: str | None
     metadata: dict[str, Any]
     created_at: datetime = Field(alias="createdAt")
+
+
+class MetricsSummaryResponse(CamelModel):
+    pending: int
+    running: int
+    succeeded: int
+    failed: int
+    dead_lettered: int = Field(alias="deadLettered")
+    queue_depth: int = Field(alias="queueDepth")
+    oldest_pending_age_seconds: int = Field(alias="oldestPendingAgeSeconds")
+    running_limit: int = Field(alias="runningLimit")
