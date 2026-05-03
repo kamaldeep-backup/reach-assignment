@@ -651,23 +651,28 @@ The API exposes Prometheus metrics at:
 GET /metrics
 ```
 
-Suggested metrics:
+Implemented metrics:
 
 ```text
 jobs_submitted_total{tenant_id}
-jobs_started_total{tenant_id}
-jobs_succeeded_total{tenant_id}
-jobs_failed_total{tenant_id}
+jobs_claimed_total{tenant_id,worker_id}
+jobs_succeeded_total{tenant_id,worker_id}
 jobs_retried_total{tenant_id}
 jobs_dead_lettered_total{tenant_id}
-job_duration_seconds_bucket{tenant_id}
-job_queue_latency_seconds_bucket{tenant_id}
-queue_pending_jobs{tenant_id}
-queue_running_jobs{tenant_id}
-queue_dead_letter_jobs{tenant_id}
+job_lease_expired_total{tenant_id}
 tenant_rate_limited_total{tenant_id}
-worker_lease_expired_total
+queue_depth{tenant_id,status}
+running_jobs{tenant_id}
+dead_letter_jobs{tenant_id}
+oldest_pending_age_seconds{tenant_id}
+tenant_running_limit{tenant_id}
+tenant_runtime_slots_used{tenant_id}
+job_execution_duration_seconds_bucket{tenant_id,job_type,outcome}
+job_queue_wait_seconds_bucket{tenant_id,job_type}
 ```
+
+The dashboard uses `GET /api/v1/metrics/summary` for tenant-scoped operational
+counts instead of deriving counts from a paginated jobs list.
 
 ### Tracing
 
@@ -906,6 +911,10 @@ Returns service health.
 ### `GET /metrics`
 
 Returns Prometheus metrics.
+
+### `GET /api/v1/metrics/summary`
+
+Returns tenant-scoped database-backed queue counts for the dashboard.
 
 ### `WS /ws/jobs`
 

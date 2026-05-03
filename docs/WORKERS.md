@@ -498,22 +498,21 @@ Minimum useful logs:
 - lease expired and recovered
 - worker shutdown requested
 
-Suggested metrics:
+Implemented worker lifecycle metrics:
 
 ```text
-worker_jobs_claimed_total
-worker_jobs_succeeded_total
-worker_jobs_failed_total
-worker_jobs_retried_total
-worker_jobs_dead_lettered_total
-worker_claim_empty_total
-worker_quota_blocked_total
-worker_lease_expired_total
-worker_job_duration_seconds
-worker_job_queue_latency_seconds
+jobs_claimed_total{tenant_id,worker_id}
+jobs_succeeded_total{tenant_id,worker_id}
+jobs_retried_total{tenant_id}
+jobs_dead_lettered_total{tenant_id}
+job_lease_expired_total{tenant_id}
+job_execution_duration_seconds_bucket{tenant_id,job_type,outcome}
+job_queue_wait_seconds_bucket{tenant_id,job_type}
 ```
 
-For the take-home, structured logs and tests are enough. Prometheus metrics can be added later through the observability layer described in `ARCHITECTURE.md`.
+The API also refreshes database-backed queue gauges during `GET /metrics`, so
+autoscaling and alerting can use authoritative queue depth and queue age rather
+than dashboard samples.
 
 ## Testing Strategy
 
