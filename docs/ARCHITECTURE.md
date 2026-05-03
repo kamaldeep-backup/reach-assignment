@@ -1,8 +1,8 @@
 # Distributed Task Queue & Job Processing Platform
 
-This document describes the final architecture for a minimal take-home implementation of a distributed task queue and job-processing platform.
+This document describes the implemented architecture for a minimal take-home implementation of a distributed task queue and job-processing platform.
 
-The system accepts authenticated JSON jobs from clients, persists them durably, schedules execution across worker processes, supports lease/ack/retry/dead-letter behavior, enforces per-tenant quotas and rate limits, and exposes operational visibility through APIs, WebSockets, metrics, tracing, logs, and a responsive dashboard.
+The system accepts authenticated JSON jobs from clients, persists them durably, schedules execution across worker processes, supports lease/ack/retry/dead-letter behavior, enforces per-tenant quotas and rate limits, and exposes operational visibility through APIs, WebSockets, Prometheus metrics, worker lifecycle logs, and a responsive dashboard.
 
 ## Goals
 
@@ -16,9 +16,9 @@ The system accepts authenticated JSON jobs from clients, persists them durably, 
 - Move terminal failures to a dead-letter queue.
 - Enforce per-tenant submission rate limits.
 - Enforce per-tenant running-job concurrency quotas.
-- Expose job status APIs and DLQ inspection APIs.
+- Expose job status APIs, including `DEAD_LETTERED` filtering for DLQ visibility.
 - Push real-time job status updates to the dashboard through WebSockets.
-- Provide basic observability through structured logs, Prometheus metrics, and OpenTelemetry traces.
+- Provide basic observability through Prometheus metrics, job history events, and worker lifecycle logs.
 - Keep the implementation small enough for a take-home assignment while documenting production trade-offs.
 
 ## Final Technology Choices
@@ -35,8 +35,8 @@ The system accepts authenticated JSON jobs from clients, persists them durably, 
 - **Rate limiting:** Postgres-backed fixed-window counters
 - **Concurrency quotas:** Postgres transactional counters per tenant
 - **Metrics:** Prometheus-compatible `/metrics`
-- **Tracing:** OpenTelemetry instrumentation
-- **Logging:** Structured JSON logs
+- **Tracing:** Future production improvement, not implemented in the take-home
+- **Logging:** Standard Python worker lifecycle logs; structured JSON request logs are future work
 - **Local runtime:** Docker Compose
 
 ## High-Level Architecture
@@ -49,8 +49,6 @@ flowchart LR
 
   API --> DB[(Postgres)]
   API --> Metrics[Prometheus Metrics]
-  API --> Traces[OpenTelemetry Traces]
-
   DB --> Scheduler[Lease Scheduler]
   Scheduler --> WorkerA[Worker Process A]
   Scheduler --> WorkerB[Worker Process B]
@@ -80,8 +78,8 @@ It does:
 - persist jobs in Postgres
 - return `202 Accepted` once a job is durably stored
 - expose job status endpoints
-- expose DLQ inspection endpoints
-- expose tenant quota visibility
+- expose DLQ visibility through `GET /jobs?status=DEAD_LETTERED`, job details, job events, metrics, and dashboard filters
+- expose tenant quota visibility through `GET /auth/me`, `GET /api/v1/metrics/summary`, and `/metrics`
 - expose Prometheus metrics
 - publish job status changes for dashboard updates
 
@@ -109,7 +107,7 @@ They do:
 - retry failed jobs with backoff
 - release tenant concurrency slots after completion or failure
 - move exhausted jobs to the DLQ
-- emit structured logs, metrics, and traces
+- emit lifecycle logs and Prometheus metrics
 
 Workers are safe to run as multiple processes because job claiming and tenant counters are updated transactionally.
 
@@ -137,7 +135,7 @@ It does:
 - create the initial tenant during registration
 - let authenticated users create, view, and revoke tenant API keys
 - submit jobs for the authenticated user's tenant
-- show pending, running, completed, failed, and DLQ jobs
+- show pending, running, completed, failed, and dead-lettered jobs through status filters
 - show per-tenant quota and rate-limit state
 - show retry attempts, lease owner, next run time, and last error
 - receive real-time job status updates over WebSockets
@@ -163,7 +161,7 @@ The dashboard is intentionally operational, not marketing-oriented.
 14. If execution fails and attempts are exhausted, the worker marks the job `DEAD_LETTERED` and inserts a row into `dead_letter_jobs`.
 15. Every state transition is recorded in `job_events`.
 16. The WebSocket broadcaster pushes job updates to connected dashboard clients.
-17. Prometheus metrics and OpenTelemetry traces capture queue depth, job latency, retries, failures, and worker behavior.
+17. Prometheus metrics and job history events capture queue depth, job latency, retries, failures, and worker behavior. OpenTelemetry tracing is intentionally left as future production work.
 
 ## Delivery Semantics
 
@@ -747,7 +745,7 @@ counts instead of deriving counts from a paginated jobs list.
 
 ### Tracing
 
-OpenTelemetry traces should include spans for:
+OpenTelemetry tracing is not implemented in the take-home code. In a production version, traces should include spans for:
 
 - `POST /jobs`
 - authentication
@@ -772,9 +770,9 @@ idempotency.key
 
 ### Logging
 
-Logs should be structured JSON.
+The current worker processes emit standard Python lifecycle logs for operational events. Structured JSON request logs, request IDs, and centralized log correlation are intentionally left as future production work.
 
-Important log events:
+Important future log events:
 
 - job submitted
 - duplicate idempotency key returned
@@ -963,17 +961,21 @@ limit=50
 
 Returns the job status history.
 
-### `GET /dlq`
+### DLQ visibility
 
-Lists dead-lettered jobs for the authenticated tenant.
+Dedicated DLQ APIs are intentionally out of scope for the take-home. DLQ visibility is available through the existing job and metrics surfaces:
 
-### `POST /dlq/{job_id}/requeue`
+- `GET /jobs?status=DEAD_LETTERED` lists dead-lettered jobs for the authenticated tenant.
+- `GET /jobs/{job_id}` shows the job payload, status, attempts, `lastError`, and completion metadata.
+- `GET /jobs/{job_id}/events` shows `DEAD_LETTERED`, `LEASE_EXPIRED`, and retry history events.
+- `GET /api/v1/metrics/summary` and `/metrics` expose dead-letter counts.
+- The dashboard jobs view includes `DEAD_LETTERED` in its status filters.
 
-Requeues a dead-lettered job by moving it back to `PENDING`, resetting `run_after`, and adding a job event.
+DLQ requeue is future operator tooling. The current implementation preserves terminal failure context in `dead_letter_jobs` but does not expose a requeue endpoint.
 
-### `GET /tenants/me/quotas`
+### Tenant quota visibility
 
-Returns rate-limit and concurrency quota state for the authenticated tenant.
+The authenticated tenant's configured limits are returned by `GET /auth/me`. Runtime queue counts are returned by `GET /api/v1/metrics/summary`, and full Prometheus gauges are returned by `/metrics`.
 
 ### `GET /health`
 
@@ -987,7 +989,7 @@ Returns Prometheus metrics.
 
 Returns tenant-scoped database-backed queue counts for the dashboard.
 
-### `WS /ws/jobs`
+### `WS /api/v1/jobs/stream`
 
 Streams job status updates for the authenticated tenant.
 
@@ -995,12 +997,17 @@ Example message:
 
 ```json
 {
-  "type": "job.status_changed",
-  "jobId": "uuid",
-  "fromStatus": "PENDING",
-  "toStatus": "RUNNING",
-  "attempts": 1,
-  "updatedAt": "2026-04-30T10:00:10Z"
+  "type": "job.event",
+  "job": {
+    "jobId": "uuid",
+    "status": "RUNNING",
+    "attempts": 1
+  },
+  "event": {
+    "eventType": "CLAIMED",
+    "fromStatus": "PENDING",
+    "toStatus": "RUNNING"
+  }
 }
 ```
 
@@ -1019,7 +1026,7 @@ It includes:
 - running jobs view with lease owner and lease expiry
 - completed jobs view
 - failed and retrying jobs view
-- DLQ view with final error and requeue action
+- dead-lettered job visibility through the `DEAD_LETTERED` status filter, job details, `lastError`, events, and metrics
 - tenant quota panel
 - live status updates through WebSockets
 
@@ -1045,7 +1052,6 @@ Desktop layout can use a sidebar plus dense tables. Tablet can use tabs with com
 │   │   │   ├── auth.py
 │   │   │   ├── api_keys.py
 │   │   │   ├── jobs.py
-│   │   │   ├── dlq.py
 │   │   │   ├── health.py
 │   │   │   ├── metrics.py
 │   │   │   └── websockets.py
@@ -1058,8 +1064,7 @@ Desktop layout can use a sidebar plus dense tables. Tablet can use tabs with com
 │   │   │   ├── users.py
 │   │   │   ├── api_keys.py
 │   │   │   ├── jobs.py
-│   │   │   ├── tenants.py
-│   │   │   └── dlq.py
+│   │   │   └── tenants.py
 │   │   ├── services
 │   │   │   ├── __init__.py
 │   │   │   ├── auth.py
@@ -1073,9 +1078,7 @@ Desktop layout can use a sidebar plus dense tables. Tablet can use tabs with com
 │   │   │   └── status_broadcaster.py
 │   │   ├── observability
 │   │   │   ├── __init__.py
-│   │   │   ├── logging.py
-│   │   │   ├── metrics.py
-│   │   │   └── tracing.py
+│   │   │   └── metrics.py
 │   │   └── workers
 │   │       ├── __init__.py
 │   │       ├── worker.py
@@ -1350,6 +1353,8 @@ Stress test:
 - Worker capacity is represented by tenant runtime quota metrics rather than a separate worker-heartbeat capacity model.
 - `FAILED` and `CANCELLED` are reserved job states; the current worker flow retries or dead-letters instead of exposing final-failed or cancel workflows.
 - WebSocket fanout can be backed by polling or Postgres notifications instead of Redis Pub/Sub.
+- Dedicated DLQ inspection and requeue APIs are intentionally out of scope; DLQ visibility is provided through `DEAD_LETTERED` job filtering, job details, job events, dashboard filters, and metrics.
+- OpenTelemetry tracing, structured JSON request logs, and request ID propagation are intentionally out of scope for the take-home.
 - Job handlers can be simple demo handlers instead of executing arbitrary untrusted code.
 - The dashboard is minimal but operationally useful.
 - Multi-region behavior is out of scope.

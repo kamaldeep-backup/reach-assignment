@@ -702,5 +702,5 @@ The baseline API can evolve into the distributed task queue by adding:
 3. Ack, retry, and DLQ behavior.
 4. Tenant rate-limit and concurrency quota tables.
 5. WebSocket status broadcasting.
-6. Prometheus metrics and OpenTelemetry tracing.
-7. Dashboard views for pending, running, failed, completed, and DLQ jobs.
+6. Prometheus metrics for queue and worker visibility. OpenTelemetry tracing can be added later as production observability work.
+7. Dashboard views for pending, running, failed, completed, and dead-lettered jobs through status filters.

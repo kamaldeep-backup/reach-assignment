@@ -346,7 +346,10 @@ WHERE id = $1
 ON CONFLICT (job_id) DO NOTHING;
 ```
 
-The worker should preserve the original payload and final error so operators can inspect or requeue the failed job later.
+The worker preserves the original payload and final error in `dead_letter_jobs`.
+Current DLQ visibility comes from `GET /jobs?status=DEAD_LETTERED`, job
+details, job events, dashboard status filters, and Prometheus metrics. A
+dedicated DLQ requeue API is intentionally left as future operator tooling.
 
 ## Lease Expiry Recovery
 
