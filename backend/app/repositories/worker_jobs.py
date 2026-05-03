@@ -23,6 +23,7 @@ from app.observability.metrics import (
     record_job_retried,
     record_job_succeeded,
 )
+from app.observability.tracing import current_trace_metadata, generate_correlation_id
 from app.services.quotas import release_runtime_slot, reserve_runtime_slot
 
 
@@ -35,6 +36,8 @@ class ClaimedJob:
     payload: dict[str, Any]
     attempts: int
     max_attempts: int
+    request_id: str | None
+    trace_id: str | None
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,12 @@ async def claim_pending_job(
         if not await reserve_runtime_slot(db_session=db_session, tenant_id=job.tenant_id):
             continue
 
+        trace_metadata = await _get_submission_trace_metadata(
+            db_session=db_session,
+            job_id=job.id,
+        )
+        if "traceId" not in trace_metadata:
+            trace_metadata["traceId"] = generate_correlation_id()
         lease_id = uuid.uuid4()
         job.status = JobStatus.RUNNING
         job.attempts += 1
@@ -89,6 +98,7 @@ async def claim_pending_job(
                     "workerId": worker_id,
                     "attempt": job.attempts,
                     "leaseSeconds": lease_seconds,
+                    **trace_metadata,
                 },
             )
         )
@@ -108,6 +118,8 @@ async def claim_pending_job(
             payload=job.payload,
             attempts=job.attempts,
             max_attempts=job.max_attempts,
+            request_id=trace_metadata.get("requestId"),
+            trace_id=trace_metadata.get("traceId"),
         )
 
     return None
@@ -149,6 +161,7 @@ async def mark_job_succeeded(
             event_metadata={
                 "workerId": worker_id,
                 "attempt": job.attempts,
+                **current_trace_metadata(),
             },
         )
     )
@@ -203,6 +216,7 @@ async def schedule_job_retry(
                 "workerId": worker_id,
                 "attempt": job.attempts,
                 "backoffSeconds": backoff_seconds,
+                **current_trace_metadata(),
             },
         )
     )
@@ -243,6 +257,7 @@ async def move_owned_job_to_dlq(
         metadata={
             "workerId": worker_id,
             "attempt": job.attempts,
+            **current_trace_metadata(),
         },
     )
     return True
@@ -265,6 +280,10 @@ async def recover_expired_leases(
 
     recovered: list[LeaseRecoveryResult] = []
     for job in result.scalars().all():
+        trace_metadata = await _get_submission_trace_metadata(
+            db_session=db_session,
+            job_id=job.id,
+        )
         await release_runtime_slot(db_session=db_session, tenant_id=job.tenant_id)
         record_job_lease_expired(job.tenant_id)
         db_session.add(
@@ -281,6 +300,7 @@ async def recover_expired_leases(
                     "leaseExpiredAt": job.lease_expires_at.isoformat()
                     if job.lease_expires_at
                     else None,
+                    **trace_metadata,
                 },
             )
         )
@@ -295,6 +315,7 @@ async def recover_expired_leases(
                     "workerId": job.locked_by,
                     "attempt": job.attempts,
                     "reason": "lease_expired",
+                    **trace_metadata,
                 },
             )
             recovered.append(
@@ -325,6 +346,7 @@ async def recover_expired_leases(
                 event_metadata={
                     "attempt": job.attempts,
                     "backoffSeconds": backoff_seconds,
+                    **trace_metadata,
                 },
             )
         )
@@ -409,3 +431,26 @@ async def _move_locked_job_to_dlq(
         claimed_at=claimed_at,
         finished_at=now,
     )
+
+
+async def _get_submission_trace_metadata(
+    *,
+    db_session: AsyncSession,
+    job_id: uuid.UUID,
+) -> dict[str, str]:
+    result = await db_session.execute(
+        select(JobEvent.event_metadata)
+        .where(
+            JobEvent.job_id == job_id,
+            JobEvent.event_type == "SUBMITTED",
+        )
+        .order_by(JobEvent.created_at.asc(), JobEvent.id.asc())
+        .limit(1)
+    )
+    metadata = result.scalar_one_or_none() or {}
+    trace_metadata: dict[str, str] = {}
+    for key in ("requestId", "traceId"):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            trace_metadata[key] = value
+    return trace_metadata

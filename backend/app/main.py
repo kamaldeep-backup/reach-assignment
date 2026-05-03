@@ -13,6 +13,7 @@ from app.observability.metrics import (
     refresh_database_gauges,
     render_prometheus_metrics,
 )
+from app.observability.tracing import install_observability_middleware
 
 
 @asynccontextmanager
@@ -35,6 +36,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    install_observability_middleware(app)
     app.include_router(api_router, prefix=settings.api_v1_prefix)
 
     @app.get("/metrics", include_in_schema=False)

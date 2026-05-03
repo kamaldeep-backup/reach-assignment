@@ -14,6 +14,7 @@ from app.repositories.worker_jobs import (
     move_owned_job_to_dlq,
     schedule_job_retry,
 )
+from app.observability.tracing import log_event, observability_context, trace_span
 from app.workers.handlers import (
     HandlerRegistry,
     NonRetryableJobError,
@@ -21,8 +22,6 @@ from app.workers.handlers import (
     build_default_registry,
 )
 from app.workers.settings import WorkerSettings, get_worker_settings
-
-logger = logging.getLogger(__name__)
 
 
 def calculate_backoff_seconds(
@@ -59,75 +58,80 @@ async def process_one_job(
     if job is None:
         return None
 
-    logger.info(
-        "job claimed",
-        extra={
-            "job_id": str(job.id),
-            "tenant_id": str(job.tenant_id),
-            "worker_id": worker_settings.worker_id,
-            "lease_id": str(job.lease_id),
-            "attempt": job.attempts,
-        },
-    )
-
-    try:
-        await handler_registry.execute(job)
-    except NonRetryableJobError as exc:
-        await _dead_letter(
-            session_factory=session_factory,
-            job=job,
-            worker_id=worker_settings.worker_id,
-            error=str(exc),
+    with observability_context(request_id=job.request_id, trace_id=job.trace_id):
+        log_event(
+            "worker.job.claimed",
+            jobId=job.id,
+            tenantId=job.tenant_id,
+            workerId=worker_settings.worker_id,
+            leaseId=job.lease_id,
+            attempt=job.attempts,
         )
-    except RetryableJobError as exc:
-        await _retry_or_dead_letter(
-            session_factory=session_factory,
-            settings=worker_settings,
-            job=job,
-            error=str(exc),
-        )
-    except Exception as exc:
-        logger.exception(
-            "job handler raised unexpected error",
-            extra={
-                "job_id": str(job.id),
-                "worker_id": worker_settings.worker_id,
-                "lease_id": str(job.lease_id),
-            },
-        )
-        await _retry_or_dead_letter(
-            session_factory=session_factory,
-            settings=worker_settings,
-            job=job,
-            error=f"{type(exc).__name__}: {exc}",
-        )
-    else:
-        async with session_factory() as session:
-            async with session.begin():
-                acknowledged = await mark_job_succeeded(
-                    db_session=session,
-                    job_id=job.id,
-                    worker_id=worker_settings.worker_id,
-                    lease_id=job.lease_id,
-                )
-        if acknowledged:
-            logger.info(
-                "job succeeded",
-                extra={
-                    "job_id": str(job.id),
-                    "worker_id": worker_settings.worker_id,
-                    "lease_id": str(job.lease_id),
-                },
+        try:
+            with trace_span(
+                "worker.job.execute",
+                jobId=job.id,
+                tenantId=job.tenant_id,
+                workerId=worker_settings.worker_id,
+                leaseId=job.lease_id,
+                jobType=job.job_type,
+                attempt=job.attempts,
+            ):
+                await handler_registry.execute(job)
+        except NonRetryableJobError as exc:
+            await _dead_letter(
+                session_factory=session_factory,
+                job=job,
+                worker_id=worker_settings.worker_id,
+                error=str(exc),
+            )
+        except RetryableJobError as exc:
+            await _retry_or_dead_letter(
+                session_factory=session_factory,
+                settings=worker_settings,
+                job=job,
+                error=str(exc),
+            )
+        except Exception as exc:
+            log_event(
+                "worker.job.handler_unexpected_error",
+                level=logging.ERROR,
+                jobId=job.id,
+                workerId=worker_settings.worker_id,
+                leaseId=job.lease_id,
+                errorType=type(exc).__name__,
+                error=str(exc),
+            )
+            await _retry_or_dead_letter(
+                session_factory=session_factory,
+                settings=worker_settings,
+                job=job,
+                error=f"{type(exc).__name__}: {exc}",
             )
         else:
-            logger.warning(
-                "job success acknowledgement was rejected",
-                extra={
-                    "job_id": str(job.id),
-                    "worker_id": worker_settings.worker_id,
-                    "lease_id": str(job.lease_id),
-                },
-            )
+            async with session_factory() as session:
+                async with session.begin():
+                    acknowledged = await mark_job_succeeded(
+                        db_session=session,
+                        job_id=job.id,
+                        worker_id=worker_settings.worker_id,
+                        lease_id=job.lease_id,
+                    )
+            if acknowledged:
+                log_event(
+                    "worker.job.succeeded",
+                    jobId=job.id,
+                    workerId=worker_settings.worker_id,
+                    leaseId=job.lease_id,
+                )
+            else:
+                log_event(
+                    "worker.job.success_ack_rejected",
+                    level=logging.WARNING,
+                    jobId=job.id,
+                    workerId=worker_settings.worker_id,
+                    leaseId=job.lease_id,
+                )
 
     return job
 
@@ -142,14 +146,14 @@ async def run_worker(
     shutdown = stop_event or asyncio.Event()
     _install_signal_handlers(shutdown)
     logging.basicConfig(level=logging.INFO)
-    logger.info("worker started", extra={"worker_id": worker_settings.worker_id})
+    log_event("worker.started", workerId=worker_settings.worker_id)
 
     while not shutdown.is_set():
         job = await process_one_job(settings=worker_settings, registry=registry)
         if job is None:
             await asyncio.sleep(worker_settings.worker_poll_interval_seconds)
 
-    logger.info("worker shutdown requested", extra={"worker_id": worker_settings.worker_id})
+    log_event("worker.shutdown_requested", workerId=worker_settings.worker_id)
 
 
 async def _retry_or_dead_letter(
@@ -185,14 +189,12 @@ async def _retry_or_dead_letter(
                 backoff_seconds=backoff_seconds,
             )
     if scheduled:
-        logger.info(
-            "job retry scheduled",
-            extra={
-                "job_id": str(job.id),
-                "worker_id": settings.worker_id,
-                "lease_id": str(job.lease_id),
-                "backoff_seconds": backoff_seconds,
-            },
+        log_event(
+            "worker.job.retry_scheduled",
+            jobId=job.id,
+            workerId=settings.worker_id,
+            leaseId=job.lease_id,
+            backoffSeconds=backoff_seconds,
         )
 
 
@@ -213,9 +215,11 @@ async def _dead_letter(
                 error=error,
             )
     if moved:
-        logger.info(
-            "job dead-lettered",
-            extra={"job_id": str(job.id), "lease_id": str(job.lease_id)},
+        log_event(
+            "worker.job.dead_lettered",
+            jobId=job.id,
+            workerId=worker_id,
+            leaseId=job.lease_id,
         )
 
 

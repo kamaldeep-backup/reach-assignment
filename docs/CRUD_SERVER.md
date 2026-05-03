@@ -495,12 +495,13 @@ Errors should use one consistent response shape:
 
 ## Observability
 
-The basic job API server should include:
+The implemented API server includes:
 
-- structured request logs
-- request ID propagation
-- job creation logs
-- authentication failure logs
+- structured JSON request logs
+- `X-Request-ID` propagation
+- lightweight `X-Trace-ID` propagation
+- span-style JSON logs for auth, job submission, API key, and worker operations
+- job creation logs and `job_events` trace metadata
 - health check endpoint
 
 Useful optional metrics:
@@ -684,7 +685,7 @@ full current queue implementation. The baseline job API server does not include:
 - submission rate limiting
 - autoscaling signals
 - full dashboard
-- tracing
+- full OpenTelemetry tracing/export
 - production metrics stack
 
 Those features are covered by the full architecture in `ARCHITECTURE.md`.
@@ -702,5 +703,5 @@ The baseline API can evolve into the distributed task queue by adding:
 3. Ack, retry, and DLQ behavior.
 4. Tenant rate-limit and concurrency quota tables.
 5. WebSocket status broadcasting.
-6. Prometheus metrics for queue and worker visibility. OpenTelemetry tracing can be added later as production observability work.
+6. Prometheus metrics, structured JSON logs, request IDs, and lightweight trace IDs for queue and worker visibility. OpenTelemetry export can be added later as production observability work.
 7. Dashboard views for pending, running, failed, completed, and dead-lettered jobs through status filters.

@@ -54,6 +54,11 @@ curl http://127.0.0.1:8000/api/v1/health/database
 
 ## Observability
 
+HTTP middleware accepts or generates `X-Request-ID` and `X-Trace-ID`, returns
+both response headers, and emits structured JSON request logs. Job submission
+stores those IDs in `job_events.metadata`; worker and lease-reaper events
+propagate them when available.
+
 Prometheus-compatible metrics are exposed without application auth for scrapers:
 
 ```bash

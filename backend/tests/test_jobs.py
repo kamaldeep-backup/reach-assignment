@@ -184,6 +184,51 @@ async def test_create_job_requires_auth_and_idempotency_then_records_submission(
 
 
 @pytest.mark.anyio
+async def test_request_and_trace_ids_are_returned_and_written_to_job_events() -> None:
+    request_id = "req-test-123"
+    trace_id = "trace-test-456"
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        token = await register_and_login(client)
+        create_response = await client.post(
+            "/api/v1/jobs",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "traced-job",
+                "X-Request-ID": request_id,
+                "X-Trace-ID": trace_id,
+            },
+            json={"type": "noop", "payload": {"ok": True}},
+        )
+
+    assert create_response.status_code == 202
+    assert create_response.headers["X-Request-ID"] == request_id
+    assert create_response.headers["X-Trace-ID"] == trace_id
+
+    await process_one_job(settings=durable_worker_settings("trace-worker"))
+
+    async with AsyncSessionLocal() as session:
+        events = (
+            await session.execute(
+                select(JobEvent)
+                .where(JobEvent.job_id == uuid.UUID(create_response.json()["jobId"]))
+                .order_by(JobEvent.created_at.asc(), JobEvent.id.asc())
+            )
+        ).scalars().all()
+
+    assert [event.event_type for event in events] == [
+        "SUBMITTED",
+        "CLAIMED",
+        "SUCCEEDED",
+    ]
+    for event in events:
+        assert event.event_metadata["requestId"] == request_id
+        assert event.event_metadata["traceId"] == trace_id
+
+
+@pytest.mark.anyio
 async def test_submitted_jobs_survive_api_and_worker_connection_restarts() -> None:
     async with AsyncClient(
         transport=ASGITransport(app=app),

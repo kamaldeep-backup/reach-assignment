@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.dependencies import AuthenticatedUser, get_current_user_context
 from app.core.database import get_db_session
+from app.observability.tracing import log_event, trace_span
 from app.repositories import users as users_repository
 from app.schemas import CurrentUserResponse, RegisterRequest, RegisterResponse, TokenResponse
 from app.services.security import (
@@ -31,18 +32,20 @@ async def register(
 ) -> RegisterResponse:
     email = normalize_email(request.email)
     try:
-        user, tenant, _membership = await users_repository.create_user_with_tenant(
-            db_session=db_session,
-            email=email,
-            password_hash=hash_password(request.password),
-            tenant_name=request.tenant_name,
-        )
+        with trace_span("auth.register"):
+            user, tenant, _membership = await users_repository.create_user_with_tenant(
+                db_session=db_session,
+                email=email,
+                password_hash=hash_password(request.password),
+                tenant_name=request.tenant_name,
+            )
     except IntegrityError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Email is already registered",
         ) from exc
 
+    log_event("auth.register.created", userId=user.id, tenantId=tenant.id)
     return RegisterResponse(userId=user.id, tenantId=tenant.id, email=user.email)
 
 
@@ -52,37 +55,39 @@ async def login(
     db_session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> TokenResponse:
     email = normalize_email(form_data.username)
-    user = await users_repository.get_user_by_email(
-        db_session=db_session,
-        email=email,
-    )
-
-    if not verify_password_with_dummy(
-        form_data.password, user.password_hash if user is not None else None
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Bearer"},
+    with trace_span("auth.login"):
+        user = await users_repository.get_user_by_email(
+            db_session=db_session,
+            email=email,
         )
 
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Inactive user",
-        )
+        if not verify_password_with_dummy(
+            form_data.password, user.password_hash if user is not None else None
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
-    await users_repository.update_last_login_at(
-        db_session=db_session,
-        user=user,
-        last_login_at=datetime.now(UTC),
-    )
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Inactive user",
+            )
+
+        await users_repository.update_last_login_at(
+            db_session=db_session,
+            user=user,
+            last_login_at=datetime.now(UTC),
+        )
+    log_event("auth.login.succeeded", userId=user.id)
     return TokenResponse(access_token=create_access_token(user.id))
 
 

@@ -5,11 +5,10 @@ import signal
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from app.core.database import AsyncSessionLocal
+from app.observability.tracing import log_event, trace_span
 from app.repositories.worker_jobs import LeaseRecoveryResult, recover_expired_leases
 from app.workers.settings import WorkerSettings, get_worker_settings
 from app.workers.worker import calculate_backoff_seconds
-
-logger = logging.getLogger(__name__)
 
 
 async def recover_once(
@@ -27,18 +26,23 @@ async def recover_once(
             jitter_seconds=worker_settings.worker_jitter_seconds,
         )
 
-    async with session_factory() as session:
-        async with session.begin():
-            recovered = await recover_expired_leases(
-                db_session=session,
-                batch_size=worker_settings.lease_reaper_batch_size,
-                backoff_seconds_for_attempt=backoff_seconds_for_attempt,
-            )
+    with trace_span(
+        "lease_reaper.recover_expired_leases",
+        batchSize=worker_settings.lease_reaper_batch_size,
+    ):
+        async with session_factory() as session:
+            async with session.begin():
+                recovered = await recover_expired_leases(
+                    db_session=session,
+                    batch_size=worker_settings.lease_reaper_batch_size,
+                    backoff_seconds_for_attempt=backoff_seconds_for_attempt,
+                )
 
     for result in recovered:
-        logger.info(
-            "expired lease recovered",
-            extra={"job_id": str(result.job_id), "status": result.status.value},
+        log_event(
+            "lease_reaper.expired_lease_recovered",
+            jobId=result.job_id,
+            status=result.status.value,
         )
     return recovered
 
@@ -52,13 +56,13 @@ async def run_reaper(
     shutdown = stop_event or asyncio.Event()
     _install_signal_handlers(shutdown)
     logging.basicConfig(level=logging.INFO)
-    logger.info("lease reaper started")
+    log_event("lease_reaper.started")
 
     while not shutdown.is_set():
         await recover_once(settings=worker_settings)
         await asyncio.sleep(worker_settings.lease_reaper_interval_seconds)
 
-    logger.info("lease reaper shutdown requested")
+    log_event("lease_reaper.shutdown_requested")
 
 
 def _install_signal_handlers(shutdown: asyncio.Event) -> None:

@@ -519,6 +519,10 @@ Events are part of the public job history, so they should be concise and avoid s
 
 ## Observability
 
+Implemented worker logs are structured JSON records emitted through the Python
+standard library logger. They include `traceId` and `requestId` when the job was
+submitted through the API with trace metadata.
+
 Minimum useful logs:
 
 - worker started
@@ -529,6 +533,11 @@ Minimum useful logs:
 - tenant quota reached
 - lease expired and recovered
 - worker shutdown requested
+
+Worker claim, success, retry, DLQ, and lease-recovery events also persist the
+submitted `requestId` and `traceId` in `job_events.metadata` when available.
+That gives a reviewer a concrete correlation path from API submission to worker
+execution without adding OpenTelemetry dependencies.
 
 Implemented worker lifecycle metrics:
 
@@ -628,7 +637,7 @@ The worker layer does not need to include:
 - a separate worker heartbeat or worker available-capacity metric
 - worker heartbeats separate from lease expiry
 - exactly-once side-effect guarantees
-- distributed tracing in the first pass
+- OpenTelemetry export, a collector, or a trace backend
 - priority starvation protection
 - real external email or webhook integrations
 - a DLQ requeue API

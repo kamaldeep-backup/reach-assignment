@@ -1,10 +1,8 @@
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 
+from app.observability.tracing import log_event
 from app.repositories.worker_jobs import ClaimedJob
-
-logger = logging.getLogger(__name__)
 
 
 class RetryableJobError(Exception):
@@ -39,18 +37,20 @@ async def noop_handler(job: ClaimedJob) -> None:
 async def send_email_handler(job: ClaimedJob) -> None:
     if "to" not in job.payload:
         raise NonRetryableJobError("send_email payload requires 'to'")
-    logger.info(
-        "send_email job completed",
-        extra={"job_id": str(job.id), "tenant_id": str(job.tenant_id)},
+    log_event(
+        "handler.send_email.completed",
+        jobId=job.id,
+        tenantId=job.tenant_id,
     )
 
 
 async def webhook_handler(job: ClaimedJob) -> None:
     if "url" not in job.payload:
         raise NonRetryableJobError("webhook payload requires 'url'")
-    logger.info(
-        "webhook job completed",
-        extra={"job_id": str(job.id), "tenant_id": str(job.tenant_id)},
+    log_event(
+        "handler.webhook.completed",
+        jobId=job.id,
+        tenantId=job.tenant_id,
     )
 
 

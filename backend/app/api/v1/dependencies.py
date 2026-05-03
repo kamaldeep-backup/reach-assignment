@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
 from app.models import APIKey, Tenant, User
+from app.observability.tracing import trace_span
 from app.repositories import api_keys as api_keys_repository
 from app.repositories import users as users_repository
 from app.services.security import decode_access_token, hash_api_key
@@ -48,32 +49,33 @@ async def resolve_user_context(
     token: str,
     db_session: AsyncSession,
 ) -> AuthenticatedUser:
-    user_id = decode_access_token(token)
-    if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    with trace_span("auth.resolve_user"):
+        user_id = decode_access_token(token)
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
-    row = await users_repository.get_user_with_primary_tenant(
-        db_session=db_session,
-        user_id=user_id,
-    )
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
+        row = await users_repository.get_user_with_primary_tenant(
+            db_session=db_session,
+            user_id=user_id,
         )
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
-    user, tenant, role = row
-    if not user.is_active or not tenant.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Inactive user or tenant",
-        )
-    return AuthenticatedUser(user=user, tenant=tenant, role=role)
+        user, tenant, role = row
+        if not user.is_active or not tenant.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Inactive user or tenant",
+            )
+        return AuthenticatedUser(user=user, tenant=tenant, role=role)
 
 
 async def get_api_key_context(
@@ -92,39 +94,40 @@ async def resolve_api_key_context(
     raw_api_key: str,
     db_session: AsyncSession,
 ) -> AuthenticatedAPIKey:
-    row = await api_keys_repository.get_api_key_with_tenant_by_hash(
-        db_session=db_session,
-        key_hash=hash_api_key(raw_api_key),
-    )
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
+    with trace_span("auth.resolve_api_key"):
+        row = await api_keys_repository.get_api_key_with_tenant_by_hash(
+            db_session=db_session,
+            key_hash=hash_api_key(raw_api_key),
         )
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key",
+            )
 
-    api_key, tenant = row
-    if not tenant.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Inactive tenant",
-        )
-    if not api_key.is_active or api_key.revoked_at is not None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Inactive API key",
-        )
-    if api_key.expires_at is not None and api_key.expires_at <= datetime.now(UTC):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Expired API key",
-        )
+        api_key, tenant = row
+        if not tenant.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Inactive tenant",
+            )
+        if not api_key.is_active or api_key.revoked_at is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Inactive API key",
+            )
+        if api_key.expires_at is not None and api_key.expires_at <= datetime.now(UTC):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Expired API key",
+            )
 
-    await api_keys_repository.update_last_used_at(
-        db_session=db_session,
-        api_key=api_key,
-        last_used_at=datetime.now(UTC),
-    )
-    return AuthenticatedAPIKey(api_key=api_key, tenant=tenant)
+        await api_keys_repository.update_last_used_at(
+            db_session=db_session,
+            api_key=api_key,
+            last_used_at=datetime.now(UTC),
+        )
+        return AuthenticatedAPIKey(api_key=api_key, tenant=tenant)
 
 
 async def get_current_tenant_context(

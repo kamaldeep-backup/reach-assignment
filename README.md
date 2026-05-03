@@ -2,9 +2,9 @@
 
 Distributed task queue and job-processing platform built as a take-home
 assignment. The repo contains a FastAPI backend, a Postgres-backed durable job
-queue, raw Python worker processes, a lease reaper, Prometheus metrics, and a
-React/Vite dashboard for authentication, job submission, job monitoring, and API
-key management.
+queue, raw Python worker processes, a lease reaper, Prometheus metrics,
+structured JSON logs with request/trace IDs, and a React/Vite dashboard for
+authentication, job submission, job monitoring, and API key management.
 
 ## Repository Overview
 

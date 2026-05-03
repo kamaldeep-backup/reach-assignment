@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.dependencies import AuthenticatedUser, get_current_user_context
 from app.core.database import get_db_session
 from app.models import APIKey
+from app.observability.tracing import log_event, trace_span
 from app.repositories import api_keys as api_keys_repository
 from app.schemas import APIKeyCreateRequest, APIKeyCreateResponse, APIKeyResponse
 from app.services.security import generate_api_key, hash_api_key
@@ -40,17 +41,24 @@ async def create_api_key(
     db_session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> APIKeyCreateResponse:
     raw_api_key, key_prefix = generate_api_key()
-    api_key = await api_keys_repository.create_api_key(
-        db_session=db_session,
-        tenant_id=current_user.tenant.id,
-        created_by_user_id=current_user.user.id,
-        key_hash=hash_api_key(raw_api_key),
-        key_prefix=key_prefix,
-        name=request.name,
-        scopes=request.scopes,
-        expires_at=request.expires_at,
-    )
+    with trace_span("api_keys.create", tenantId=current_user.tenant.id):
+        api_key = await api_keys_repository.create_api_key(
+            db_session=db_session,
+            tenant_id=current_user.tenant.id,
+            created_by_user_id=current_user.user.id,
+            key_hash=hash_api_key(raw_api_key),
+            key_prefix=key_prefix,
+            name=request.name,
+            scopes=request.scopes,
+            expires_at=request.expires_at,
+        )
 
+    log_event(
+        "api_keys.created",
+        tenantId=current_user.tenant.id,
+        apiKeyId=api_key.id,
+        keyPrefix=api_key.key_prefix,
+    )
     return APIKeyCreateResponse(
         **serialize_api_key(api_key).model_dump(by_alias=True),
         apiKey=raw_api_key,
@@ -95,10 +103,20 @@ async def revoke_api_key(
         db_session=db_session,
     )
     if api_key.revoked_at is None:
-        await api_keys_repository.revoke_api_key(
-            db_session=db_session,
-            api_key=api_key,
-            revoked_at=datetime.now(UTC),
+        with trace_span(
+            "api_keys.revoke",
+            tenantId=current_user.tenant.id,
+            apiKeyId=api_key.id,
+        ):
+            await api_keys_repository.revoke_api_key(
+                db_session=db_session,
+                api_key=api_key,
+                revoked_at=datetime.now(UTC),
+            )
+        log_event(
+            "api_keys.revoked",
+            tenantId=current_user.tenant.id,
+            apiKeyId=api_key.id,
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

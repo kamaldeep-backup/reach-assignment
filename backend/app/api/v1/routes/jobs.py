@@ -21,6 +21,7 @@ from app.api.v1.dependencies import (
 from app.core.database import get_db_session
 from app.models import Job, JobEvent, JobStatus
 from app.observability.metrics import record_job_submitted, record_tenant_rate_limited
+from app.observability.tracing import current_trace_metadata, log_event, trace_span
 from app.repositories import jobs as jobs_repository
 from app.schemas import (
     JobCreateRequest,
@@ -129,20 +130,33 @@ async def create_job(
         )
 
     tenant_id = current_context.tenant.id
-    existing_job = await jobs_repository.get_job_by_idempotency_key(
-        db_session=db_session,
-        tenant_id=tenant_id,
-        idempotency_key=idempotency_key,
-    )
+    with trace_span("jobs.idempotency_lookup", tenantId=tenant_id):
+        existing_job = await jobs_repository.get_job_by_idempotency_key(
+            db_session=db_session,
+            tenant_id=tenant_id,
+            idempotency_key=idempotency_key,
+        )
     if existing_job is not None:
+        log_event(
+            "jobs.submit.duplicate_idempotency_key",
+            tenantId=tenant_id,
+            jobId=existing_job.id,
+            jobStatus=existing_job.status.value,
+        )
         return serialize_job(existing_job)
 
-    rate_limit_result = await reserve_submission_slot(
-        db_session=db_session,
-        tenant_id=tenant_id,
-    )
+    with trace_span("jobs.reserve_submission_slot", tenantId=tenant_id):
+        rate_limit_result = await reserve_submission_slot(
+            db_session=db_session,
+            tenant_id=tenant_id,
+        )
     if not rate_limit_result.allowed:
         record_tenant_rate_limited(tenant_id)
+        log_event(
+            "jobs.submit.rate_limited",
+            tenantId=tenant_id,
+            retryAfterSeconds=rate_limit_result.retry_after_seconds or 60,
+        )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Tenant submission rate limit exceeded",
@@ -150,14 +164,20 @@ async def create_job(
         )
 
     try:
-        job = await jobs_repository.create_job(
-            db_session=db_session,
-            tenant_id=tenant_id,
-            idempotency_key=idempotency_key,
-            job_type=request.job_type,
-            payload=request.payload,
+        with trace_span(
+            "jobs.create",
+            tenantId=tenant_id,
+            jobType=request.job_type,
             priority=request.priority,
-        )
+        ):
+            job = await jobs_repository.create_job(
+                db_session=db_session,
+                tenant_id=tenant_id,
+                idempotency_key=idempotency_key,
+                job_type=request.job_type,
+                payload=request.payload,
+                priority=request.priority,
+            )
     except IntegrityError:
         await db_session.rollback()
         existing_job = await jobs_repository.get_job_by_idempotency_key(
@@ -175,8 +195,16 @@ async def create_job(
         from_status=None,
         to_status=JobStatus.PENDING,
         message="Job submitted",
+        metadata=current_trace_metadata(),
     )
     record_job_submitted(tenant_id)
+    log_event(
+        "jobs.submit.accepted",
+        tenantId=tenant_id,
+        jobId=job.id,
+        jobType=job.job_type,
+        priority=job.priority,
+    )
     await jobs_repository.refresh_job(db_session=db_session, job=job)
     return serialize_job(job)
 

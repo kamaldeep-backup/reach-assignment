@@ -35,8 +35,8 @@ The system accepts authenticated JSON jobs from clients, persists them durably, 
 - **Rate limiting:** Postgres-backed fixed-window counters
 - **Concurrency quotas:** Postgres transactional counters per tenant
 - **Metrics:** Prometheus-compatible `/metrics`
-- **Tracing:** Future production improvement, not implemented in the take-home
-- **Logging:** Standard Python worker lifecycle logs; structured JSON request logs are future work
+- **Tracing:** Lightweight trace IDs and span-style JSON logs using the Python standard library; OpenTelemetry export is a future production improvement
+- **Logging:** Structured JSON HTTP request logs with request IDs, trace IDs, worker lifecycle logs, and job-event correlation metadata
 - **Local runtime:** Docker Compose
 
 ## High-Level Architecture
@@ -161,7 +161,7 @@ The dashboard is intentionally operational, not marketing-oriented.
 14. If execution fails and attempts are exhausted, the worker marks the job `DEAD_LETTERED` and inserts a row into `dead_letter_jobs`.
 15. Every state transition is recorded in `job_events`.
 16. The WebSocket broadcaster pushes job updates to connected dashboard clients.
-17. Prometheus metrics and job history events capture queue depth, job latency, retries, failures, and worker behavior. OpenTelemetry tracing is intentionally left as future production work.
+17. Prometheus metrics, structured JSON logs, lightweight trace spans, and job history events capture queue depth, job latency, retries, failures, and worker behavior. OpenTelemetry export is intentionally left as future production work.
 
 ## Delivery Semantics
 
@@ -758,19 +758,29 @@ counts instead of deriving counts from a paginated jobs list.
 
 ### Tracing
 
-OpenTelemetry tracing is not implemented in the take-home code. In a production version, traces should include spans for:
+The take-home implements dependency-free trace correlation rather than a full
+OpenTelemetry SDK. HTTP middleware accepts or generates `X-Request-ID` and
+`X-Trace-ID`, returns both headers on API responses, and stores the values in
+request-local context. API and worker code use small span helpers that emit
+`trace.span.start` and `trace.span.end` JSON log records with span IDs,
+durations, outcomes, and relevant attributes.
 
-- `POST /jobs`
-- authentication
-- rate-limit check
-- job insert or idempotency lookup
-- worker claim
-- job execution
-- ack or retry
-- DLQ insert
-- WebSocket publish
+`POST /jobs` writes the current `requestId` and `traceId` into the
+`SUBMITTED` job event. Worker claim, retry, success, DLQ, and lease-reaper
+events propagate those metadata fields so a single submitted job can be
+followed across API and worker processes through `job_events` and logs.
 
-Each trace should include useful attributes:
+Implemented lightweight spans include:
+
+- auth register/login and credential resolution
+- job idempotency lookup
+- submission rate-limit reservation
+- job insert
+- worker handler execution
+- API key create/revoke
+- lease reaper recovery
+
+Useful trace/log attributes include:
 
 ```text
 tenant.id
@@ -779,23 +789,32 @@ job.status
 job.attempt
 worker.id
 idempotency.key
+request.id
+trace.id
 ```
+
+This is intentionally not wire-compatible distributed tracing. A production
+version should replace or bridge the helpers with OpenTelemetry instrumentation,
+exporters, and a trace backend.
 
 ### Logging
 
-The current worker processes emit standard Python lifecycle logs for operational events. Structured JSON request logs, request IDs, and centralized log correlation are intentionally left as future production work.
+The API emits structured JSON logs for every HTTP request. Request logs include
+method, path, status code, duration, `requestId`, and `traceId`. Application
+events such as registration, login, job submission, rate limiting, duplicate
+idempotency returns, API key creation/revocation, worker execution, retries,
+DLQ moves, and lease recovery also use structured JSON log records.
 
-Important future log events:
+Centralized log aggregation is intentionally out of scope for the take-home,
+but the log format is machine-readable and can be shipped to a production log
+backend later.
 
-- job submitted
-- duplicate idempotency key returned
-- job claimed
-- job succeeded
-- job failed and scheduled for retry
-- job moved to DLQ
-- lease expired
-- tenant rate limited
+Useful future log improvements:
+
 - tenant concurrency quota reached
+- WebSocket connection lifecycle events
+- request and job correlation in a centralized log backend
+- structured exception stack traces for unexpected server errors
 
 ## API Endpoints
 
@@ -1366,7 +1385,7 @@ Stress test:
 - `FAILED` and `CANCELLED` are reserved job states; the current worker flow retries or dead-letters instead of exposing final-failed or cancel workflows.
 - WebSocket fanout can be backed by polling or Postgres notifications instead of Redis Pub/Sub.
 - Dedicated DLQ inspection and requeue APIs are intentionally out of scope; DLQ visibility is provided through `DEAD_LETTERED` job filtering, job details, job events, dashboard filters, and metrics.
-- OpenTelemetry tracing, structured JSON request logs, and request ID propagation are intentionally out of scope for the take-home.
+- OpenTelemetry export, a collector, and a trace backend are intentionally out of scope; the take-home uses lightweight trace IDs, span-style JSON logs, and request ID propagation.
 - Job handlers can be simple demo handlers instead of executing arbitrary untrusted code.
 - The dashboard is minimal but operationally useful.
 - Multi-region behavior is out of scope.
