@@ -154,7 +154,7 @@ The dashboard is intentionally operational, not marketing-oriented.
 7. The API returns `202 Accepted` with the job ID and current status.
 8. A worker claims an eligible pending job in a Postgres transaction.
 9. The worker checks and increments the tenant's running-job counter.
-10. The worker marks the job `RUNNING`, sets `locked_by`, and sets `lease_expires_at`.
+10. The worker marks the job `RUNNING`, sets `locked_by`, generates a fresh `lease_id`, and sets `lease_expires_at`.
 11. The worker executes the job handler.
 12. If execution succeeds, the worker marks the job `SUCCEEDED`.
 13. If execution fails and attempts remain, the worker marks the job `PENDING` and schedules `run_after` using backoff.
@@ -241,6 +241,7 @@ erDiagram
     timestamptz run_after
     timestamptz lease_expires_at
     text locked_by
+    uuid lease_id
     text last_error
     timestamptz created_at
     timestamptz updated_at
@@ -350,6 +351,7 @@ CREATE TABLE jobs (
   run_after TIMESTAMPTZ NOT NULL DEFAULT now(),
   lease_expires_at TIMESTAMPTZ,
   locked_by TEXT,
+  lease_id UUID,
   last_error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -469,9 +471,10 @@ UPDATE jobs
 SET status = 'RUNNING',
     attempts = attempts + 1,
     locked_by = $1,
-    lease_expires_at = now() + ($2 || ' seconds')::interval,
+    lease_id = $2,
+    lease_expires_at = now() + ($3 || ' seconds')::interval,
     updated_at = now()
-WHERE id = $3
+WHERE id = $4
   AND status = 'PENDING';
 ```
 
@@ -488,11 +491,14 @@ UPDATE jobs
 SET status = 'SUCCEEDED',
     lease_expires_at = NULL,
     locked_by = NULL,
+    lease_id = NULL,
     completed_at = now(),
     updated_at = now()
 WHERE id = $1
   AND status = 'RUNNING'
-  AND locked_by = $2;
+  AND locked_by = $2
+  AND lease_id = $3
+  AND lease_expires_at > now();
 ```
 
 ### Retryable Failure
@@ -505,11 +511,14 @@ SET status = 'PENDING',
     run_after = now() + ($1 || ' seconds')::interval,
     lease_expires_at = NULL,
     locked_by = NULL,
+    lease_id = NULL,
     last_error = $2,
     updated_at = now()
 WHERE id = $3
   AND status = 'RUNNING'
-  AND locked_by = $4;
+  AND locked_by = $4
+  AND lease_id = $5
+  AND lease_expires_at > now();
 ```
 
 Backoff can be:
@@ -527,11 +536,15 @@ UPDATE jobs
 SET status = 'DEAD_LETTERED',
     lease_expires_at = NULL,
     locked_by = NULL,
+    lease_id = NULL,
     last_error = $1,
     completed_at = now(),
     updated_at = now()
 WHERE id = $2
-  AND status = 'RUNNING';
+  AND status = 'RUNNING'
+  AND locked_by = $3
+  AND lease_id = $4
+  AND lease_expires_at > now();
 ```
 
 ```sql
@@ -553,7 +566,7 @@ jobs.lease_expires_at < now()
 
 The lease reaper treats this as a failed attempt. If attempts remain, the job becomes `PENDING` again. If attempts are exhausted, the job moves to the DLQ.
 
-The key edge case is that a slow worker may still finish after its lease expires. The ack update includes `locked_by` and `status = 'RUNNING'`, so a stale worker cannot ack a job it no longer owns after another worker has reclaimed it.
+The key edge case is that a slow worker may still finish after its lease expires. Ack, retry, and DLQ updates include `locked_by`, `lease_id`, `status = 'RUNNING'`, and a live `lease_expires_at` guard, so a stale worker cannot update a job it no longer owns after another worker has reclaimed it or after the lease has expired.
 
 ## Authentication And API Keys
 
@@ -1280,7 +1293,6 @@ PASSWORD_HASH_SCHEME=argon2
 ACCESS_TOKEN_SECRET=replace-me
 ACCESS_TOKEN_EXPIRE_MINUTES=60
 API_KEY_PEPPER=replace-me
-WORKER_ID=worker-local
 WORKER_POLL_INTERVAL_SECONDS=1
 WORKER_LEASE_SECONDS=60
 JOB_MAX_ATTEMPTS=3

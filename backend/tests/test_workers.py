@@ -1,8 +1,10 @@
+import asyncio
+from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
 import uuid
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.core.database import AsyncSessionLocal, dispose_database_engine
 from app.models import (
@@ -18,9 +20,11 @@ from app.models import (
     User,
 )
 from app.repositories.worker_jobs import (
+    ClaimedJob,
     claim_pending_job,
     mark_job_succeeded,
     move_owned_job_to_dlq,
+    schedule_job_retry,
 )
 from app.workers.lease_reaper import recover_once
 from app.workers.handlers import HandlerRegistry, RetryableJobError
@@ -84,6 +88,7 @@ async def create_tenant_and_job(
     run_after: datetime | None = None,
     status: JobStatus = JobStatus.PENDING,
     locked_by: str | None = None,
+    lease_id: uuid.UUID | None = None,
     lease_expires_at: datetime | None = None,
 ) -> tuple[Tenant, Job]:
     async with AsyncSessionLocal() as session:
@@ -101,6 +106,7 @@ async def create_tenant_and_job(
             run_after=run_after or datetime.now(UTC) - timedelta(seconds=1),
             status=status,
             locked_by=locked_by,
+            lease_id=lease_id,
             lease_expires_at=lease_expires_at,
         )
         session.add(job)
@@ -135,6 +141,7 @@ async def test_claim_pending_job_marks_running_and_records_event() -> None:
     assert stored_job.status == JobStatus.RUNNING
     assert stored_job.attempts == 1
     assert stored_job.locked_by == "worker-1"
+    assert stored_job.lease_id == claimed.lease_id
     assert stored_job.lease_expires_at is not None
     assert quota is not None
     assert quota.running_jobs == 1
@@ -183,6 +190,7 @@ async def test_two_workers_cannot_claim_same_pending_job_concurrently() -> None:
     assert second_claim is None
     assert stored_job is not None
     assert stored_job.locked_by == "worker-1"
+    assert stored_job.lease_id == first_claim.lease_id
     assert len(claim_events) == 1
 
 
@@ -208,6 +216,7 @@ async def test_successful_handler_marks_succeeded_and_releases_quota() -> None:
     assert stored_job.status == JobStatus.SUCCEEDED
     assert stored_job.completed_at is not None
     assert stored_job.locked_by is None
+    assert stored_job.lease_id is None
     assert stored_job.lease_expires_at is None
     assert quota is not None
     assert quota.running_jobs == 0
@@ -236,6 +245,7 @@ async def test_retryable_failure_requeues_with_backoff_and_releases_quota() -> N
     assert stored_job is not None
     assert stored_job.status == JobStatus.PENDING
     assert stored_job.attempts == 1
+    assert stored_job.lease_id is None
     assert stored_job.run_after > datetime.now(UTC)
     assert "Intentional first-attempt failure" in (stored_job.last_error or "")
     assert quota is not None
@@ -258,12 +268,14 @@ async def test_exhausted_retry_moves_to_dlq_and_dlq_insert_is_idempotent() -> No
     registry.register("always_retry", always_retry)
 
     processed = await process_one_job(settings=worker_settings(), registry=registry)
+    assert processed is not None
     async with AsyncSessionLocal() as session:
         async with session.begin():
             second_dlq_move = await move_owned_job_to_dlq(
                 db_session=session,
                 job_id=job.id,
                 worker_id="worker-1",
+                lease_id=processed.lease_id,
                 error="duplicate terminal update",
             )
 
@@ -274,11 +286,11 @@ async def test_exhausted_retry_moves_to_dlq_and_dlq_insert_is_idempotent() -> No
             await session.execute(select(DeadLetterJob).where(DeadLetterJob.job_id == job.id))
         ).scalars().all()
 
-    assert processed is not None
     assert second_dlq_move is False
     assert stored_job is not None
     assert stored_job.status == JobStatus.DEAD_LETTERED
     assert stored_job.attempts == 3
+    assert stored_job.lease_id is None
     assert quota is not None
     assert quota.running_jobs == 0
     assert len(dead_letters) == 1
@@ -289,7 +301,7 @@ async def test_exhausted_retry_moves_to_dlq_and_dlq_insert_is_idempotent() -> No
 async def test_unknown_job_type_is_non_retryable_dead_letter() -> None:
     _tenant, job = await create_tenant_and_job(job_type="missing")
 
-    await process_one_job(settings=worker_settings())
+    processed = await process_one_job(settings=worker_settings())
 
     async with AsyncSessionLocal() as session:
         stored_job = await session.get(Job, job.id)
@@ -297,18 +309,22 @@ async def test_unknown_job_type_is_non_retryable_dead_letter() -> None:
             await session.execute(select(DeadLetterJob).where(DeadLetterJob.job_id == job.id))
         ).scalar_one()
 
+    assert processed is not None
     assert stored_job is not None
     assert stored_job.status == JobStatus.DEAD_LETTERED
+    assert stored_job.lease_id is None
     assert "Unknown job type" in (stored_job.last_error or "")
     assert dead_letter.final_error == stored_job.last_error
 
 
 @pytest.mark.anyio
 async def test_quota_limit_prevents_over_claiming_without_failing_job() -> None:
+    busy_lease_id = uuid.uuid4()
     tenant, running_job = await create_tenant_and_job(
         max_running_jobs=1,
         status=JobStatus.RUNNING,
         locked_by="busy-worker",
+        lease_id=busy_lease_id,
         lease_expires_at=datetime.now(UTC) + timedelta(minutes=1),
     )
     async with AsyncSessionLocal() as session:
@@ -375,6 +391,7 @@ async def test_default_worker_candidates_skip_saturated_tenant(
             payload={"ok": True},
             status=JobStatus.RUNNING,
             locked_by="busy-worker",
+            lease_id=uuid.uuid4(),
             lease_expires_at=now + timedelta(minutes=1),
             created_at=now - timedelta(minutes=3),
         )
@@ -459,12 +476,197 @@ async def test_future_run_after_jobs_are_not_claimed() -> None:
 
 
 @pytest.mark.anyio
+async def test_owned_updates_require_current_lease_token() -> None:
+    tenant, job = await create_tenant_and_job()
+
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            claimed = await claim_pending_job(
+                db_session=session,
+                worker_id="worker-1",
+                lease_seconds=30,
+            )
+
+    assert claimed is not None
+    wrong_lease_id = uuid.uuid4()
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stale_success = await mark_job_succeeded(
+                db_session=session,
+                job_id=job.id,
+                worker_id="worker-1",
+                lease_id=wrong_lease_id,
+            )
+            stale_retry = await schedule_job_retry(
+                db_session=session,
+                job_id=job.id,
+                worker_id="worker-1",
+                lease_id=wrong_lease_id,
+                error="wrong lease",
+                backoff_seconds=2,
+            )
+            stale_dlq = await move_owned_job_to_dlq(
+                db_session=session,
+                job_id=job.id,
+                worker_id="worker-1",
+                lease_id=wrong_lease_id,
+                error="wrong lease",
+            )
+
+    async with AsyncSessionLocal() as session:
+        stored_job = await session.get(Job, job.id)
+        quota = await session.get(TenantRuntimeQuota, tenant.id)
+
+    assert stale_success is False
+    assert stale_retry is False
+    assert stale_dlq is False
+    assert stored_job is not None
+    assert stored_job.status == JobStatus.RUNNING
+    assert stored_job.locked_by == "worker-1"
+    assert stored_job.lease_id == claimed.lease_id
+    assert quota is not None
+    assert quota.running_jobs == 1
+
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            current_success = await mark_job_succeeded(
+                db_session=session,
+                job_id=job.id,
+                worker_id="worker-1",
+                lease_id=claimed.lease_id,
+            )
+
+    assert current_success is True
+    async with AsyncSessionLocal() as session:
+        stored_job = await session.get(Job, job.id)
+        quota = await session.get(TenantRuntimeQuota, tenant.id)
+
+    assert stored_job is not None
+    assert stored_job.status == JobStatus.SUCCEEDED
+    assert stored_job.lease_id is None
+    assert quota is not None
+    assert quota.running_jobs == 0
+
+
+@pytest.mark.anyio
+async def test_owned_updates_reject_expired_lease_even_with_current_token() -> None:
+    lease_id = uuid.uuid4()
+    tenant, job = await create_tenant_and_job(
+        status=JobStatus.RUNNING,
+        attempts=1,
+        locked_by="worker-1",
+        lease_id=lease_id,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    async with AsyncSessionLocal() as session:
+        quota = await session.get(TenantRuntimeQuota, tenant.id)
+        assert quota is not None
+        quota.running_jobs = 1
+        await session.commit()
+
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stale_success = await mark_job_succeeded(
+                db_session=session,
+                job_id=job.id,
+                worker_id="worker-1",
+                lease_id=lease_id,
+            )
+
+    async with AsyncSessionLocal() as session:
+        stored_job = await session.get(Job, job.id)
+        quota = await session.get(TenantRuntimeQuota, tenant.id)
+
+    assert stale_success is False
+    assert stored_job is not None
+    assert stored_job.status == JobStatus.RUNNING
+    assert stored_job.lease_id == lease_id
+    assert quota is not None
+    assert quota.running_jobs == 1
+
+
+@pytest.mark.anyio
+async def test_stale_same_worker_lease_cannot_ack_reclaimed_job() -> None:
+    tenant, job = await create_tenant_and_job()
+
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            first_claim = await claim_pending_job(
+                db_session=session,
+                worker_id="worker-1",
+                lease_seconds=30,
+            )
+
+    assert first_claim is not None
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stored_job = await session.get(Job, job.id)
+            assert stored_job is not None
+            stored_job.lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    recovered = await recover_once(settings=worker_settings())
+    assert len(recovered) == 1
+
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stored_job = await session.get(Job, job.id)
+            assert stored_job is not None
+            stored_job.run_after = datetime.now(UTC) - timedelta(seconds=1)
+
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            second_claim = await claim_pending_job(
+                db_session=session,
+                worker_id="worker-1",
+                lease_seconds=30,
+            )
+
+    assert second_claim is not None
+    assert second_claim.id == first_claim.id
+    assert second_claim.lease_id != first_claim.lease_id
+
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            stale_ack = await mark_job_succeeded(
+                db_session=session,
+                job_id=job.id,
+                worker_id="worker-1",
+                lease_id=first_claim.lease_id,
+            )
+
+    async with AsyncSessionLocal() as session:
+        stored_job = await session.get(Job, job.id)
+        quota = await session.get(TenantRuntimeQuota, tenant.id)
+
+    assert stale_ack is False
+    assert stored_job is not None
+    assert stored_job.status == JobStatus.RUNNING
+    assert stored_job.locked_by == "worker-1"
+    assert stored_job.lease_id == second_claim.lease_id
+    assert quota is not None
+    assert quota.running_jobs == 1
+
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            current_ack = await mark_job_succeeded(
+                db_session=session,
+                job_id=job.id,
+                worker_id="worker-1",
+                lease_id=second_claim.lease_id,
+            )
+
+    assert current_ack is True
+
+
+@pytest.mark.anyio
 async def test_lease_reaper_requeues_expired_leases_and_rejects_stale_ack() -> None:
+    stale_lease_id = uuid.uuid4()
     tenant, job = await create_tenant_and_job(
         status=JobStatus.RUNNING,
         attempts=1,
         max_attempts=3,
         locked_by="stale-worker",
+        lease_id=stale_lease_id,
         lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     async with AsyncSessionLocal() as session:
@@ -480,6 +682,7 @@ async def test_lease_reaper_requeues_expired_leases_and_rejects_stale_ack() -> N
                 db_session=session,
                 job_id=job.id,
                 worker_id="stale-worker",
+                lease_id=stale_lease_id,
             )
 
     async with AsyncSessionLocal() as session:
@@ -498,6 +701,7 @@ async def test_lease_reaper_requeues_expired_leases_and_rejects_stale_ack() -> N
     assert stored_job is not None
     assert stored_job.status == JobStatus.PENDING
     assert stored_job.locked_by is None
+    assert stored_job.lease_id is None
     assert stored_job.run_after > datetime.now(UTC)
     assert quota is not None
     assert quota.running_jobs == 0
@@ -511,6 +715,7 @@ async def test_lease_reaper_uses_expired_job_attempts_for_backoff() -> None:
         attempts=2,
         max_attempts=3,
         locked_by="stale-worker",
+        lease_id=uuid.uuid4(),
         lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     async with AsyncSessionLocal() as session:
@@ -546,6 +751,7 @@ async def test_lease_reaper_dead_letters_exhausted_expired_leases() -> None:
         attempts=3,
         max_attempts=3,
         locked_by="stale-worker",
+        lease_id=uuid.uuid4(),
         lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
     )
     async with AsyncSessionLocal() as session:
@@ -566,6 +772,138 @@ async def test_lease_reaper_dead_letters_exhausted_expired_leases() -> None:
     assert len(recovered) == 1
     assert stored_job is not None
     assert stored_job.status == JobStatus.DEAD_LETTERED
+    assert stored_job.lease_id is None
     assert quota is not None
     assert quota.running_jobs == 0
     assert dead_letter.attempts == 3
+
+
+@pytest.mark.anyio
+async def test_multiple_workers_preserve_lease_uniqueness_and_tenant_quotas_under_load() -> None:
+    now = datetime.now(UTC)
+    tenant_limits = [1, 2, 3]
+    jobs_per_tenant = 8
+    total_jobs = len(tenant_limits) * jobs_per_tenant
+    stress_jobs: list[Job] = []
+
+    async with AsyncSessionLocal() as session:
+        tenants = [
+            Tenant(name=f"Stress Tenant {index}", max_running_jobs=max_running_jobs)
+            for index, max_running_jobs in enumerate(tenant_limits, start=1)
+        ]
+        session.add_all(tenants)
+        await session.flush()
+
+        session.add_all(
+            TenantRuntimeQuota(tenant_id=tenant.id) for tenant in tenants
+        )
+        for tenant in tenants:
+            for job_index in range(jobs_per_tenant):
+                job = Job(
+                    tenant_id=tenant.id,
+                    idempotency_key=f"stress-{tenant.id}-{job_index}",
+                    job_type="noop",
+                    payload={"jobIndex": job_index},
+                    run_after=now - timedelta(seconds=1),
+                    created_at=now + timedelta(milliseconds=job_index),
+                )
+                session.add(job)
+                stress_jobs.append(job)
+        await session.commit()
+        quota_by_tenant_id = {
+            tenant.id: tenant.max_running_jobs for tenant in tenants
+        }
+        stress_job_ids = {job.id for job in stress_jobs}
+
+    active_by_tenant_id: defaultdict[uuid.UUID, int] = defaultdict(int)
+    max_active_by_tenant_id: defaultdict[uuid.UUID, int] = defaultdict(int)
+    processed_job_ids: list[uuid.UUID] = []
+    claimed_lease_ids: list[uuid.UUID] = []
+    tracker_lock = asyncio.Lock()
+    registry = HandlerRegistry()
+
+    async def tracked_noop(job: ClaimedJob) -> None:
+        tenant_id = job.tenant_id
+        async with tracker_lock:
+            active_by_tenant_id[tenant_id] += 1
+            max_active_by_tenant_id[tenant_id] = max(
+                max_active_by_tenant_id[tenant_id],
+                active_by_tenant_id[tenant_id],
+            )
+
+        await asyncio.sleep(0.01)
+
+        async with tracker_lock:
+            active_by_tenant_id[tenant_id] -= 1
+            processed_job_ids.append(job.id)
+            claimed_lease_ids.append(job.lease_id)
+
+    registry.register("noop", tracked_noop)
+
+    async def unfinished_job_count() -> int:
+        async with AsyncSessionLocal() as session:
+            return int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Job)
+                    .where(
+                        Job.id.in_(stress_job_ids),
+                        Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+                    )
+                )
+                or 0
+            )
+
+    async def worker_loop(worker_index: int) -> None:
+        settings = worker_settings(worker_id=f"stress-worker-{worker_index}")
+        while True:
+            processed = await process_one_job(settings=settings, registry=registry)
+            if processed is not None:
+                continue
+            if await unfinished_job_count() == 0:
+                return
+            await asyncio.sleep(0.005)
+
+    await asyncio.gather(*(worker_loop(index) for index in range(8)))
+
+    async with AsyncSessionLocal() as session:
+        jobs = (
+            await session.execute(select(Job).where(Job.id.in_(stress_job_ids)))
+        ).scalars().all()
+        quotas = (
+            await session.execute(
+                select(TenantRuntimeQuota).where(
+                    TenantRuntimeQuota.tenant_id.in_(quota_by_tenant_id.keys())
+                )
+            )
+        ).scalars().all()
+        events = (
+            await session.execute(
+                select(JobEvent).where(
+                    JobEvent.job_id.in_(stress_job_ids),
+                    JobEvent.event_type.in_(["CLAIMED", "SUCCEEDED"])
+                )
+            )
+        ).scalars().all()
+
+    event_counts_by_job_id: defaultdict[uuid.UUID, Counter[str]] = defaultdict(Counter)
+    for event in events:
+        event_counts_by_job_id[event.job_id][event.event_type] += 1
+
+    assert len(jobs) == total_jobs
+    terminal_errors = {
+        str(job.id): job.last_error
+        for job in jobs
+        if job.status != JobStatus.SUCCEEDED
+    }
+    assert terminal_errors == {}
+    assert {job.lease_id for job in jobs} == {None}
+    assert len(processed_job_ids) == total_jobs
+    assert len(set(processed_job_ids)) == total_jobs
+    assert len(claimed_lease_ids) == total_jobs
+    assert len(set(claimed_lease_ids)) == total_jobs
+    assert {quota.running_jobs for quota in quotas} == {0}
+    for tenant_id, max_running_jobs in quota_by_tenant_id.items():
+        assert max_active_by_tenant_id[tenant_id] <= max_running_jobs
+    for job in jobs:
+        assert event_counts_by_job_id[job.id] == Counter({"CLAIMED": 1, "SUCCEEDED": 1})

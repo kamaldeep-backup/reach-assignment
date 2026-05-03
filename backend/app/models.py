@@ -215,6 +215,7 @@ class Job(Base):
     )
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_by: Mapped[str | None] = mapped_column(Text)
+    lease_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

@@ -12,10 +12,13 @@ from app.models import (
     JobEvent,
     JobStatus,
     Tenant,
+    TenantRuntimeQuota,
     TenantSubmissionRateLimit,
     TenantUser,
     User,
 )
+from app.workers.settings import WorkerSettings
+from app.workers.worker import process_one_job
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +28,7 @@ async def clean_tables() -> None:
         for model in (
             JobEvent,
             Job,
+            TenantRuntimeQuota,
             TenantSubmissionRateLimit,
             APIKey,
             TenantUser,
@@ -38,6 +42,7 @@ async def clean_tables() -> None:
         for model in (
             JobEvent,
             Job,
+            TenantRuntimeQuota,
             TenantSubmissionRateLimit,
             APIKey,
             TenantUser,
@@ -99,6 +104,19 @@ async def create_job(
     )
     assert response.status_code == 202
     return response.json()
+
+
+def durable_worker_settings(worker_id: str = "durable-worker") -> WorkerSettings:
+    return WorkerSettings(
+        worker_id=worker_id,
+        worker_lease_seconds=60,
+        worker_batch_size=10,
+        worker_base_backoff_seconds=2,
+        worker_max_backoff_seconds=60,
+        worker_jitter_seconds=0,
+        lease_reaper_batch_size=50,
+        _env_file=None,
+    )
 
 
 @pytest.mark.anyio
@@ -163,6 +181,60 @@ async def test_create_job_requires_auth_and_idempotency_then_records_submission(
     assert job_count == 1
     assert event.event_type == "SUBMITTED"
     assert event.to_status == JobStatus.PENDING
+
+
+@pytest.mark.anyio
+async def test_submitted_jobs_survive_api_and_worker_connection_restarts() -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        token = await register_and_login(client)
+        created_job = await create_job(client, token, "durable-job", "noop")
+
+    await dispose_database_engine()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as restarted_client:
+        persisted_response = await restarted_client.get(
+            f"/api/v1/jobs/{created_job['jobId']}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    await dispose_database_engine()
+
+    processed = await process_one_job(
+        settings=durable_worker_settings("restarted-worker")
+    )
+
+    await dispose_database_engine()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as restarted_client:
+        completed_response = await restarted_client.get(
+            f"/api/v1/jobs/{created_job['jobId']}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        events_response = await restarted_client.get(
+            f"/api/v1/jobs/{created_job['jobId']}/events",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert persisted_response.status_code == 200
+    assert persisted_response.json()["status"] == "PENDING"
+    assert processed is not None
+    assert str(processed.id) == created_job["jobId"]
+    assert completed_response.status_code == 200
+    assert completed_response.json()["status"] == "SUCCEEDED"
+    assert [event["eventType"] for event in events_response.json()] == [
+        "SUBMITTED",
+        "CLAIMED",
+        "SUCCEEDED",
+    ]
 
 
 @pytest.mark.anyio

@@ -697,7 +697,7 @@ active worker outcomes.
 
 The baseline API can evolve into the distributed task queue by adding:
 
-1. `attempts`, `max_attempts`, `run_after`, `lease_expires_at`, and `locked_by` fields to jobs.
+1. `attempts`, `max_attempts`, `run_after`, `lease_expires_at`, `locked_by`, and `lease_id` fields to jobs.
 2. Worker claim logic using `FOR UPDATE SKIP LOCKED`.
 3. Ack, retry, and DLQ behavior.
 4. Tenant rate-limit and concurrency quota tables.

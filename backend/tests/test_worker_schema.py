@@ -98,6 +98,7 @@ async def test_jobs_have_worker_queue_fields_and_dead_letter_status() -> None:
     assert job.run_after <= datetime.now(UTC)
     assert job.lease_expires_at is None
     assert job.locked_by is None
+    assert job.lease_id is None
     assert JobStatus.DEAD_LETTERED.value == "DEAD_LETTERED"
 
 

@@ -65,6 +65,7 @@ async def process_one_job(
             "job_id": str(job.id),
             "tenant_id": str(job.tenant_id),
             "worker_id": worker_settings.worker_id,
+            "lease_id": str(job.lease_id),
             "attempt": job.attempts,
         },
     )
@@ -88,7 +89,11 @@ async def process_one_job(
     except Exception as exc:
         logger.exception(
             "job handler raised unexpected error",
-            extra={"job_id": str(job.id), "worker_id": worker_settings.worker_id},
+            extra={
+                "job_id": str(job.id),
+                "worker_id": worker_settings.worker_id,
+                "lease_id": str(job.lease_id),
+            },
         )
         await _retry_or_dead_letter(
             session_factory=session_factory,
@@ -103,16 +108,25 @@ async def process_one_job(
                     db_session=session,
                     job_id=job.id,
                     worker_id=worker_settings.worker_id,
+                    lease_id=job.lease_id,
                 )
         if acknowledged:
             logger.info(
                 "job succeeded",
-                extra={"job_id": str(job.id), "worker_id": worker_settings.worker_id},
+                extra={
+                    "job_id": str(job.id),
+                    "worker_id": worker_settings.worker_id,
+                    "lease_id": str(job.lease_id),
+                },
             )
         else:
             logger.warning(
                 "job success acknowledgement was rejected",
-                extra={"job_id": str(job.id), "worker_id": worker_settings.worker_id},
+                extra={
+                    "job_id": str(job.id),
+                    "worker_id": worker_settings.worker_id,
+                    "lease_id": str(job.lease_id),
+                },
             )
 
     return job
@@ -166,6 +180,7 @@ async def _retry_or_dead_letter(
                 db_session=session,
                 job_id=job.id,
                 worker_id=settings.worker_id,
+                lease_id=job.lease_id,
                 error=error,
                 backoff_seconds=backoff_seconds,
             )
@@ -175,6 +190,7 @@ async def _retry_or_dead_letter(
             extra={
                 "job_id": str(job.id),
                 "worker_id": settings.worker_id,
+                "lease_id": str(job.lease_id),
                 "backoff_seconds": backoff_seconds,
             },
         )
@@ -193,10 +209,14 @@ async def _dead_letter(
                 db_session=session,
                 job_id=job.id,
                 worker_id=worker_id,
+                lease_id=job.lease_id,
                 error=error,
             )
     if moved:
-        logger.info("job dead-lettered", extra={"job_id": str(job.id)})
+        logger.info(
+            "job dead-lettered",
+            extra={"job_id": str(job.id), "lease_id": str(job.lease_id)},
+        )
 
 
 def _install_signal_handlers(shutdown: asyncio.Event) -> None:

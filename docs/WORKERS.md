@@ -68,8 +68,7 @@ It does:
 - reserve tenant concurrency before execution
 - mark claimed jobs `RUNNING`
 - increment `attempts`
-- set `locked_by` to the worker ID
-- set `lease_expires_at`
+- set `locked_by` to the worker ID, generate `lease_id`, and set `lease_expires_at`
 - dispatch to a handler based on `job_type`
 - mark successful jobs `SUCCEEDED`
 - schedule retryable failures back to `PENDING`
@@ -180,6 +179,7 @@ max_attempts      int, default 3
 run_after         timestamptz, default now()
 lease_expires_at  timestamptz, nullable
 locked_by         text, nullable
+lease_id          uuid, nullable
 last_error        text, nullable
 completed_at      timestamptz, nullable
 ```
@@ -222,7 +222,7 @@ The worker claim must happen in one database transaction:
 3. Increment the tenant's `running_jobs` counter.
 4. Mark the job `RUNNING`.
 5. Increment `attempts`.
-6. Set `locked_by` and `lease_expires_at`.
+6. Set `locked_by`, a fresh `lease_id`, and `lease_expires_at`.
 7. Insert a `job_events` row.
 8. Commit before running the handler.
 
@@ -262,9 +262,10 @@ UPDATE jobs
 SET status = 'RUNNING',
     attempts = attempts + 1,
     locked_by = $1,
-    lease_expires_at = now() + ($2 || ' seconds')::interval,
+    lease_id = $2,
+    lease_expires_at = now() + ($3 || ' seconds')::interval,
     updated_at = now()
-WHERE id = $3
+WHERE id = $4
   AND status = 'PENDING';
 ```
 
@@ -281,14 +282,17 @@ UPDATE jobs
 SET status = 'SUCCEEDED',
     lease_expires_at = NULL,
     locked_by = NULL,
+    lease_id = NULL,
     completed_at = now(),
     updated_at = now()
 WHERE id = $1
   AND status = 'RUNNING'
-  AND locked_by = $2;
+  AND locked_by = $2
+  AND lease_id = $3
+  AND lease_expires_at > now();
 ```
 
-The `locked_by` guard prevents stale workers from acking jobs they no longer own.
+The `locked_by`, `lease_id`, and live `lease_expires_at` guards prevent stale workers from acking jobs they no longer own, even when worker IDs are reused.
 
 ### Retryable Failure
 
@@ -300,11 +304,14 @@ SET status = 'PENDING',
     run_after = now() + ($1 || ' seconds')::interval,
     lease_expires_at = NULL,
     locked_by = NULL,
+    lease_id = NULL,
     last_error = $2,
     updated_at = now()
 WHERE id = $3
   AND status = 'RUNNING'
-  AND locked_by = $4;
+  AND locked_by = $4
+  AND lease_id = $5
+  AND lease_expires_at > now();
 ```
 
 Backoff should be bounded:
@@ -330,12 +337,15 @@ UPDATE jobs
 SET status = 'DEAD_LETTERED',
     lease_expires_at = NULL,
     locked_by = NULL,
+    lease_id = NULL,
     last_error = $1,
     completed_at = now(),
     updated_at = now()
 WHERE id = $2
   AND status = 'RUNNING'
-  AND locked_by = $3;
+  AND locked_by = $3
+  AND lease_id = $4
+  AND lease_expires_at > now();
 ```
 
 ```sql
@@ -386,7 +396,6 @@ Recommended environment variables:
 
 ```text
 DATABASE_URL=postgresql+asyncpg://reach:reach@postgres:5432/reach
-WORKER_ID=worker-local
 WORKER_POLL_INTERVAL_SECONDS=1
 WORKER_LEASE_SECONDS=60
 WORKER_BATCH_SIZE=10
@@ -396,7 +405,7 @@ LEASE_REAPER_INTERVAL_SECONDS=10
 LEASE_REAPER_BATCH_SIZE=50
 ```
 
-If `WORKER_ID` is not set, the process can generate one from hostname, process ID, and a short random suffix. `WORKER_BATCH_SIZE` is the number of eligible claim candidates inspected per poll; each worker still executes one claimed job at a time.
+If `WORKER_ID` is not set, the process generates one from hostname, process ID, and a short random suffix. Only set `WORKER_ID` manually for single-process debugging; scaled workers should use generated or otherwise container-unique IDs. `WORKER_BATCH_SIZE` is the number of eligible claim candidates inspected per poll; each worker still executes one claimed job at a time.
 
 ## Proposed Code Structure
 
@@ -438,7 +447,6 @@ worker:
       required: false
   environment:
     DATABASE_URL: postgresql+asyncpg://reach:reach@postgres:5432/reach
-    WORKER_ID: worker-1
   depends_on:
     postgres:
       condition: service_healthy
@@ -599,7 +607,7 @@ Useful integration test:
 
 - The worker should commit the claim transaction before running the handler.
 - Ack, retry, DLQ, and quota release should be one transaction.
-- SQL updates should include `status = 'RUNNING'` and `locked_by = worker_id` guards.
+- SQL updates should include `status = 'RUNNING'`, `locked_by = worker_id`, `lease_id`, and live `lease_expires_at` guards.
 - The worker should trap `SIGINT` and `SIGTERM`, finish or fail the current database operation, and exit cleanly.
 - Handlers should be idempotent because the platform provides at-least-once execution.
 - Unknown `job_type` should be treated as non-retryable and moved to the DLQ.

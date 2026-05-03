@@ -30,6 +30,7 @@ from app.services.quotas import release_runtime_slot, reserve_runtime_slot
 class ClaimedJob:
     id: uuid.UUID
     tenant_id: uuid.UUID
+    lease_id: uuid.UUID
     job_type: str
     payload: dict[str, Any]
     attempts: int
@@ -69,9 +70,11 @@ async def claim_pending_job(
         if not await reserve_runtime_slot(db_session=db_session, tenant_id=job.tenant_id):
             continue
 
+        lease_id = uuid.uuid4()
         job.status = JobStatus.RUNNING
         job.attempts += 1
         job.locked_by = worker_id
+        job.lease_id = lease_id
         job.lease_expires_at = now + timedelta(seconds=lease_seconds)
         job.updated_at = now
         db_session.add(
@@ -100,6 +103,7 @@ async def claim_pending_job(
         return ClaimedJob(
             id=job.id,
             tenant_id=job.tenant_id,
+            lease_id=lease_id,
             job_type=job.job_type,
             payload=job.payload,
             attempts=job.attempts,
@@ -114,11 +118,13 @@ async def mark_job_succeeded(
     db_session: AsyncSession,
     job_id: uuid.UUID,
     worker_id: str,
+    lease_id: uuid.UUID,
 ) -> bool:
     job = await _get_owned_running_job(
         db_session=db_session,
         job_id=job_id,
         worker_id=worker_id,
+        lease_id=lease_id,
     )
     if job is None:
         return False
@@ -128,6 +134,7 @@ async def mark_job_succeeded(
     await release_runtime_slot(db_session=db_session, tenant_id=job.tenant_id)
     job.status = JobStatus.SUCCEEDED
     job.locked_by = None
+    job.lease_id = None
     job.lease_expires_at = None
     job.completed_at = now
     job.updated_at = now
@@ -139,7 +146,10 @@ async def mark_job_succeeded(
             from_status=JobStatus.RUNNING,
             to_status=JobStatus.SUCCEEDED,
             message="Job completed successfully",
-            event_metadata={"workerId": worker_id, "attempt": job.attempts},
+            event_metadata={
+                "workerId": worker_id,
+                "attempt": job.attempts,
+            },
         )
     )
     await db_session.flush()
@@ -158,6 +168,7 @@ async def schedule_job_retry(
     db_session: AsyncSession,
     job_id: uuid.UUID,
     worker_id: str,
+    lease_id: uuid.UUID,
     error: str,
     backoff_seconds: float,
 ) -> bool:
@@ -165,6 +176,7 @@ async def schedule_job_retry(
         db_session=db_session,
         job_id=job_id,
         worker_id=worker_id,
+        lease_id=lease_id,
     )
     if job is None:
         return False
@@ -174,6 +186,7 @@ async def schedule_job_retry(
     await release_runtime_slot(db_session=db_session, tenant_id=job.tenant_id)
     job.status = JobStatus.PENDING
     job.locked_by = None
+    job.lease_id = None
     job.lease_expires_at = None
     job.run_after = now + timedelta(seconds=backoff_seconds)
     job.last_error = error
@@ -208,6 +221,7 @@ async def move_owned_job_to_dlq(
     db_session: AsyncSession,
     job_id: uuid.UUID,
     worker_id: str,
+    lease_id: uuid.UUID,
     error: str,
     event_type: str = "DEAD_LETTERED",
 ) -> bool:
@@ -215,6 +229,7 @@ async def move_owned_job_to_dlq(
         db_session=db_session,
         job_id=job_id,
         worker_id=worker_id,
+        lease_id=lease_id,
     )
     if job is None:
         return False
@@ -225,7 +240,10 @@ async def move_owned_job_to_dlq(
         job=job,
         error=error,
         event_type=event_type,
-        metadata={"workerId": worker_id, "attempt": job.attempts},
+        metadata={
+            "workerId": worker_id,
+            "attempt": job.attempts,
+        },
     )
     return True
 
@@ -273,7 +291,11 @@ async def recover_expired_leases(
                 job=job,
                 error="Worker lease expired and attempts were exhausted",
                 event_type="DEAD_LETTERED",
-                metadata={"attempt": job.attempts, "reason": "lease_expired"},
+                metadata={
+                    "workerId": job.locked_by,
+                    "attempt": job.attempts,
+                    "reason": "lease_expired",
+                },
             )
             recovered.append(
                 LeaseRecoveryResult(
@@ -287,6 +309,7 @@ async def recover_expired_leases(
         backoff_seconds = backoff_seconds_for_attempt(job.attempts)
         job.status = JobStatus.PENDING
         job.locked_by = None
+        job.lease_id = None
         job.lease_expires_at = None
         job.run_after = now + timedelta(seconds=backoff_seconds)
         job.last_error = "Worker lease expired before acknowledgement"
@@ -322,13 +345,18 @@ async def _get_owned_running_job(
     db_session: AsyncSession,
     job_id: uuid.UUID,
     worker_id: str,
+    lease_id: uuid.UUID,
 ) -> Job | None:
+    now = datetime.now(UTC)
     result = await db_session.execute(
         select(Job)
         .where(
             Job.id == job_id,
             Job.status == JobStatus.RUNNING,
             Job.locked_by == worker_id,
+            Job.lease_id == lease_id,
+            Job.lease_expires_at.is_not(None),
+            Job.lease_expires_at > now,
         )
         .with_for_update()
     )
@@ -347,6 +375,7 @@ async def _move_locked_job_to_dlq(
     claimed_at = job.updated_at
     job.status = JobStatus.DEAD_LETTERED
     job.locked_by = None
+    job.lease_id = None
     job.lease_expires_at = None
     job.last_error = error
     job.completed_at = now
