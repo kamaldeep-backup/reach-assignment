@@ -2,7 +2,7 @@
 
 This document outlines the worker side of the take-home project. It describes the next layer after the baseline CRUD server in `CRUD_SERVER.md`: raw Python worker processes that claim pending jobs from Postgres, execute handlers asynchronously from the API request path, acknowledge successful work, retry transient failures, recover expired leases, and preserve terminal failures in a dead-letter queue.
 
-The current repository implements the API, authentication, durable job submission, and job history. Worker code is not present yet. This document defines the worker design that should be added to evolve the baseline server toward the full platform described in `ARCHITECTURE.md`.
+The current repository implements the API, authentication, durable job submission, job history, worker processes, lease recovery, retry behavior, dead-letter handling, tenant runtime quotas, and worker tests. This document records the implemented worker design and the production trade-offs that remain intentionally out of scope for the take-home.
 
 ## Goals
 
@@ -436,7 +436,7 @@ Suggested ownership:
 
 ## Docker Compose
 
-The current `docker-compose.yml` runs the frontend, API server, and Postgres. The worker layer should add two backend services.
+The current `docker-compose.yml` runs the frontend, API server, Postgres, one worker process, and one lease reaper process. The worker services are defined as separate backend containers so they can be scaled independently from the API.
 
 ```yaml
 worker:
@@ -450,6 +450,8 @@ worker:
   depends_on:
     postgres:
       condition: service_healthy
+    server:
+      condition: service_healthy
   command: python -m app.workers.worker
 
 lease-reaper:
@@ -462,6 +464,8 @@ lease-reaper:
     DATABASE_URL: postgresql+asyncpg://reach:reach@postgres:5432/reach
   depends_on:
     postgres:
+      condition: service_healthy
+    server:
       condition: service_healthy
   command: python -m app.workers.lease_reaper
 ```
@@ -631,14 +635,14 @@ The worker layer does not need to include:
 
 Those can be added after the core claim, execute, ack, retry, DLQ, and reaper semantics are correct.
 
-## Path From Baseline API To Workers
+## Implemented Worker Layer
 
-The current codebase can evolve toward this design by adding:
+The repository includes the worker layer described above:
 
-1. A migration for `DEAD_LETTERED`, worker lease fields, tenant runtime quotas, and `dead_letter_jobs`.
-2. SQLAlchemy model updates for the new columns and tables.
-3. Worker repository functions for claim, ack, retry, DLQ, and lease recovery.
-4. A small handler registry with deterministic test handlers.
-5. `python -m app.workers.worker` and `python -m app.workers.lease_reaper` entry points.
-6. Docker Compose services for `worker` and `lease-reaper`.
-7. Worker tests that cover concurrency, retries, lease expiry, stale acks, and DLQ behavior.
+1. Migrations add `DEAD_LETTERED`, worker lease fields, tenant runtime quotas, and `dead_letter_jobs`.
+2. SQLAlchemy models include the worker queue columns and tables.
+3. `app/repositories/worker_jobs.py` implements claim, ack, retry, DLQ, and lease recovery database operations.
+4. `app/workers/handlers.py` provides deterministic demonstration handlers.
+5. `python -m app.workers.worker` and `python -m app.workers.lease_reaper` are runnable entry points.
+6. `docker-compose.yml` includes `worker` and `lease-reaper` services.
+7. The pytest suite covers concurrent claims, retries, lease expiry, stale acks, quota release, DLQ behavior, and stress behavior across multiple workers.
